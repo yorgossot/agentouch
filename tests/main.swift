@@ -118,6 +118,45 @@ check("URIs without a scheme are understood", hasLogin(in: vault, site: "shop.ex
 check("another username isn't a duplicate", !hasLogin(in: vault, site: "example.com", username: "someone.else@icloud.com"))
 check("another site isn't a duplicate", !hasLogin(in: vault, site: "example.net", username: "quiet.fox@icloud.com"))
 check("a subdomain isn't the same site", !hasLogin(in: vault, site: "evil.example.com", username: "quiet.fox@icloud.com"))
+// MARK: logging in with an existing login
+
+let accounts: [[String: Any]] = [
+    ["reprompt": 0, "login": ["username": "me@icloud.com", "password": "pw-shop", "uris": [["uri": "https://www.shop.example/login"]]]],
+    ["reprompt": 0, "login": ["username": "work@icloud.com", "password": "pw-work", "uris": [["uri": "https://multi.example"]]]],
+    ["reprompt": 0, "login": ["username": "home@icloud.com", "password": "pw-home", "uris": [["uri": "multi.example"]]]],
+    ["reprompt": 1, "login": ["username": "me", "password": "pw-bank", "uris": [["uri": "https://bank.example"]]]],
+    ["reprompt": 0, "login": ["username": "x", "password": "pw-other", "uris": [["uri": "https://shop.example.evil.example"]]]],
+    ["reprompt": 0, "login": ["username": "me", "password": "pw-never", "uris": [["uri": "https://never.example", "match": 5]]]],
+    ["reprompt": 0, "login": ["username": "twin@icloud.com", "password": "pw-twin", "uris": [["uri": "https://twins.example"]]]],
+    ["reprompt": 0, "login": ["username": "Twin@icloud.com", "password": "pw-twin", "uris": [["uri": "https://twins.example"]]]],
+    ["reprompt": 0, "login": ["username": "odd@icloud.com", "password": "pw-1", "uris": [["uri": "https://odd.example"]]]],
+    ["reprompt": 0, "login": ["username": "odd@icloud.com", "password": "pw-2", "uris": [["uri": "https://odd.example"]]]],
+    ["reprompt": 0, "deletedDate": "2026-10-01T00:00:00Z", "login": ["username": "gone", "password": "pw-gone", "uris": [["uri": "https://trash.example"]]]],
+]
+do {
+    let one = try pickLogin(in: accounts, site: "shop.example", username: nil)
+    check("the site's only login is picked", one == ("me@icloud.com", "pw-shop"))
+    let chosen = try pickLogin(in: accounts, site: "multi.example", username: "HOME@icloud.com")
+    check("--username picks among several", chosen.password == "pw-home")
+} catch {
+    check("picking a login", false, "\(error)")
+}
+check("the same account saved twice is fine", (try? pickLogin(in: accounts, site: "twins.example", username: nil))?.password == "pw-twin")
+refuses("the same account with two passwords", "different passwords") { _ = try pickLogin(in: accounts, site: "odd.example", username: nil) }
+refuses("URI match Never is respected", "no Bitwarden login") { _ = try pickLogin(in: accounts, site: "never.example", username: nil) }
+check("URI match Never still counts as existing for sign-ups", hasLogin(in: accounts, site: "never.example", username: "me"))
+refuses("deleted items are ignored", "no Bitwarden login") { _ = try pickLogin(in: accounts, site: "trash.example", username: nil) }
+refuses("several logins need --username", "several Bitwarden logins") { _ = try pickLogin(in: accounts, site: "multi.example", username: nil) }
+refuses("re-prompt items are left to the user", "asks for the master password again") { _ = try pickLogin(in: accounts, site: "bank.example", username: nil) }
+refuses("no login for an unknown site", "no Bitwarden login") { _ = try pickLogin(in: accounts, site: "unknown.example", username: nil) }
+refuses("a look-alike host gets nothing", "no Bitwarden login") { _ = try pickLogin(in: accounts, site: "shop.example.evil", username: nil) }
+refuses("a subdomain doesn't borrow the parent's login", "no Bitwarden login") { _ = try pickLogin(in: accounts, site: "evil.shop.example", username: nil) }
+refuses("wrong username", "no Bitwarden login for shop.example as") { _ = try pickLogin(in: accounts, site: "shop.example", username: "other") }
+refuses("login site must be a plain domain", "--site") { _ = try planLogin(["--site", "https://shop.example"]) }
+refuses("login site homoglyph", "--site") { _ = try planLogin(["--site", "shоp.example"]) }
+refuses("login username with spaces", "--username") { _ = try planLogin(["--site", "shop.example", "--username", "a b"]) }
+check("valid login request", (try? planLogin(["--site", "Shop.Example"]))?.site == "shop.example")
+
 let tmp = FileManager.default.temporaryDirectory.standardizedFileURL.path
 check("the watcher removes its own socket directory", isSocketDirectory("\(tmp)/agentouch.Ab12Cd"))
 check("the watcher refuses a path that climbs out", !isSocketDirectory("\(tmp)/agentouch.Ab12Cd/../.."))

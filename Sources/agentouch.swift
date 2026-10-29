@@ -19,6 +19,10 @@
 //   agentouch login-new --site SITE --username NAME [--folder F] [--task WHY]
 //                                                after Touch ID, save a new login with a fresh
 //                                                password to Bitwarden; password onto the clipboard
+//   agentouch login --site SITE [--username NAME]
+//                                                after Touch ID, put an existing Bitwarden login's
+//                                                password on the clipboard for 30 s
+//   agentouch clipboard-clear                    clear a password agentouch put on the clipboard
 //   agentouch rm NAME                            delete a secret, after Touch ID
 //   agentouch run NAME[,NAME] -- PROG [ARGS...]  one Touch ID for the exact command shown
 import AppKit
@@ -364,15 +368,15 @@ func generatePassword(length: Int) -> String {
 }
 
 // Puts a password on the clipboard, marked so clipboard managers skip it, and clears it
-// after 90 seconds unless something else was copied since.
-func copyToClipboard(_ password: String) throws {
+// after `seconds` unless something else was copied since.
+func copyToClipboard(_ password: String, seconds: Int = 90) throws {
     let pasteboard = NSPasteboard.general
     pasteboard.clearContents()
     pasteboard.setString(password, forType: .string)
     pasteboard.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
     let clearer = Process()
     clearer.executableURL = Bundle.main.executableURL
-    clearer.arguments = ["_clear-clipboard", String(pasteboard.changeCount)]
+    clearer.arguments = ["_clear-clipboard", String(pasteboard.changeCount), String(seconds)]
     clearer.standardOutput = FileHandle.nullDevice
     clearer.standardError = FileHandle.nullDevice
     try clearer.run()
@@ -388,7 +392,7 @@ func cmdPassword(_ args: [String]) throws {
 // MARK: Saving new logins to Bitwarden
 
 // The Bitwarden master password is stored under this reserved name with an empty allow-list,
-// so `run` can never hand it to a program; only `login-new` uses it.
+// so `run` can never hand it to a program; only `login-new` and `login` use it.
 let masterName = "_bitwarden-master"
 
 // A short-lived `bw serve` on a Unix socket in a private (0700) directory. One Node start-up
@@ -593,18 +597,52 @@ func isSocketDirectory(_ path: String) -> Bool {
         && url.lastPathComponent.range(of: #"^agentouch\.[A-Za-z0-9]{6}$"#, options: .regularExpression) != nil
 }
 
-// Whether the vault already has a login for this site (or its www. form) and username.
-func hasLogin(in items: [[String: Any]], site: String, username: String) -> Bool {
+// The vault's logins for exactly this site (or its www. form); subdomains, look-alikes and
+// deleted items don't count. For use, a URI whose Bitwarden match setting is "Never" (5) doesn't
+// count either: that's the user saying not to fill it there.
+func logins(in items: [[String: Any]], site: String, forUse: Bool = false) -> [[String: Any]] {
     func bare(_ host: String) -> String { host.hasPrefix("www.") ? String(host.dropFirst(4)) : host }
-    return items.contains { item in
-        guard let login = item["login"] as? [String: Any],
-              (login["username"] as? String)?.lowercased() == username.lowercased() else { return false }
-        let uris = (login["uris"] as? [[String: Any]] ?? []).compactMap { $0["uri"] as? String }
-        return uris.contains { uri in
+    return items.compactMap { item in
+        guard let login = item["login"] as? [String: Any], item["deletedDate"] == nil || item["deletedDate"] is NSNull else { return nil }
+        let uris = (login["uris"] as? [[String: Any]] ?? [])
+            .filter { !forUse || ($0["match"] as? Int) != 5 }
+            .compactMap { $0["uri"] as? String }
+        let matches = uris.contains { uri in
             let host = URL(string: uri)?.host ?? URL(string: "https://\(uri)")?.host
             return host.map { bare($0.lowercased()) == bare(site) } ?? false
         }
+        return matches ? item : nil
     }
+}
+
+// Whether the vault already has a login for this site and username.
+func hasLogin(in items: [[String: Any]], site: String, username: String) -> Bool {
+    logins(in: items, site: site).contains {
+        (($0["login"] as? [String: Any])?["username"] as? String)?.lowercased() == username.lowercased()
+    }
+}
+
+// The one login to use for a site: never an item marked "master password re-prompt" (the user
+// keeps those for themselves), and if there are several, only the one with the given username.
+func pickLogin(in items: [[String: Any]], site: String, username: String?) throws -> (username: String, password: String) {
+    var found = logins(in: items, site: site, forUse: true)
+    guard !found.isEmpty else { throw Fail("no Bitwarden login for \(site)") }
+    found.removeAll { ($0["reprompt"] as? Int ?? 0) != 0 }
+    guard !found.isEmpty else { throw Fail("the Bitwarden login for \(site) asks for the master password again; the user logs in themselves") }
+    func name(_ item: [String: Any]) -> String { (item["login"] as? [String: Any])?["username"] as? String ?? "" }
+    if let username { found.removeAll { name($0).lowercased() != username.lowercased() } }
+    guard !found.isEmpty else { throw Fail("no Bitwarden login for \(site) as \(username ?? "")") }
+    func password(_ item: [String: Any]) -> String { (item["login"] as? [String: Any])?["password"] as? String ?? "" }
+    if Set(found.map { name($0).lowercased() }).count > 1 {
+        let names = found.map(name).prefix(5).joined(separator: ", ")
+        throw Fail("several Bitwarden logins for \(site): \(names)\(found.count > 5 ? ", …" : ""); run again with --username")
+    }
+    // The same account saved twice is fine as long as both copies agree.
+    guard Set(found.map(password)).count == 1 else {
+        throw Fail("different passwords are saved for \(site) as \(name(found[0])); fix them in Bitwarden")
+    }
+    guard !password(found[0]).isEmpty else { throw Fail("the Bitwarden login for \(site) has no password") }
+    return (name(found[0]), password(found[0]))
 }
 
 func cmdSetMaster(_ args: [String]) async throws {
@@ -612,7 +650,7 @@ func cmdSetMaster(_ args: [String]) async throws {
     guard args.isEmpty || fromClipboard else { throw Fail("usage: agentouch set-master [--from-clipboard]") }
     var store = try loadStore()
     let source = fromClipboard ? "the text on your clipboard" : "your Bitwarden master password"
-    _ = try await approve("store \(source) as the Bitwarden master password, used only to save new logins")
+    _ = try await approve("store \(source) as the Bitwarden master password, used only by login-new and login")
     let value = try readSecret(name: "your Bitwarden master password", fromClipboard: fromClipboard)
     if fromClipboard || isatty(0) == 1 { NSPasteboard.general.clearContents() }
 
@@ -714,6 +752,69 @@ func cmdLoginNew(_ args: [String]) async throws {
     try copyToClipboard(password)
     audit("saved login: \(site) as \(username) in \(folder)")
     print("saved “\(site)” (\(username)) to Bitwarden in “\(folder)”; its password is on the clipboard for 90 s")
+}
+
+struct LoginUsePlan { var site: String, username: String? }
+
+// Checks a login request before any prompt.
+func planLogin(_ args: [String]) throws -> LoginUsePlan {
+    var options: [String: String] = [:]
+    var rest = args[...]
+    while let flag = rest.popFirst() {
+        guard ["--site", "--username"].contains(flag), let value = rest.popFirst() else {
+            throw Fail("usage: agentouch login --site example.com [--username NAME]")
+        }
+        options[flag] = value
+    }
+    guard let site = options["--site"]?.lowercased() else { throw Fail("usage: agentouch login --site example.com [--username NAME]") }
+    guard site.count <= 253, site.range(of: hostPattern, options: .regularExpression) != nil,
+          site.range(of: #"^[0-9.]+$"#, options: .regularExpression) == nil else {
+        throw Fail("--site must be a domain like example.com")
+    }
+    if let username = options["--username"],
+       username.range(of: #"^[A-Za-z0-9._+@-]{1,100}$"#, options: .regularExpression) == nil {
+        throw Fail("--username must be plain ASCII without spaces")
+    }
+    return LoginUsePlan(site: site, username: options["--username"])
+}
+
+// Puts the password of an existing Bitwarden login on the clipboard for 30 s and prints its
+// username, for logging in to that one site. One touch per use; nothing else leaves the vault.
+func cmdLogin(_ args: [String]) async throws {
+    let plan = try planLogin(args)
+    let store = try loadStore()
+    guard let masterSecret = store.secrets.first(where: { $0.name == masterName }) else {
+        throw Fail("no Bitwarden master password stored — the user runs: agentouch set-master")
+    }
+    let who = plan.username.map { " as \($0)" } ?? ""
+    let context = try await approve("put your Bitwarden password for \(plan.site)\(who) on the clipboard for 30 s, to log in there")
+    let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: store.seKey, authenticationContext: context)
+    let master = try open(masterSecret, with: seKey, sePublic: store.sePublicKey)
+    context.invalidate()
+
+    let chosen = try await Bitwarden.unlocked(master, redacting: [(name: "master password", value: master)]) { bw in
+        _ = try bw.call("POST", "/sync")
+        var items = try bw.list("items")
+        for _ in 0..<4 where items.isEmpty {  // bitwarden/clients#23283, as in login-new
+            try await Task.sleep(nanoseconds: 750_000_000)
+            items = try bw.list("items")
+        }
+        return try pickLogin(in: items, site: plan.site, username: plan.username)
+    }
+    try copyToClipboard(chosen.password, seconds: 30)
+    audit("password to clipboard: \(plan.site) as \(chosen.username)")
+    print("username: \(chosen.username)\nits password is on the clipboard for 30 s (agentouch clipboard-clear clears it now)")
+}
+
+// Clears the clipboard if it holds a concealed item: agentouch's, or a password manager's.
+func cmdClipboardClear() {
+    let pasteboard = NSPasteboard.general
+    if pasteboard.types?.contains(NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")) == true {
+        pasteboard.clearContents()
+        print("cleared a concealed item from the clipboard")
+    } else {
+        print("no concealed item on the clipboard")
+    }
 }
 
 func cmdList() throws {

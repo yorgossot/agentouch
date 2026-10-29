@@ -18,7 +18,8 @@ the command's output.
 
 `agentouch` can also sign you up for websites: it generates a password, saves the login straight
 into your Bitwarden vault, and puts the password on the clipboard for the form — one touch, and
-the agent never sees the password.
+the agent never sees the password. With another touch, it puts the password of a login you
+already have on the clipboard for 30 seconds, so the agent can log you in.
 
 Two Swift files, no daemon, no dependencies beyond macOS (and the Bitwarden CLI, if you
 want sign-ups). **Unofficial; not affiliated with Bitwarden.**
@@ -28,13 +29,13 @@ want sign-ups). **Unofficial; not affiliated with Bitwarden.**
 Read this before relying on `agentouch`. It is a guardrail for a well-meaning agent, not a
 sandbox for a hostile one.
 
-**What it protects:** the values of your stored secrets, your Bitwarden master password, and
-the passwords of accounts it creates.
+**What it protects:** the values of your stored secrets, your Bitwarden master password, the
+passwords of accounts it creates, and the passwords it fetches for logging in.
 
 **Who it defends against:** an AI agent that has shell access as your user and that
 - **makes mistakes**: pastes a token into a log, runs the wrong command, uses your real email;
 - **is steered by prompt injection**: a web page, email, issue, README or tool output tells it
-  to send a token somewhere, print it, store a new one, or sign up somewhere.
+  to send a token somewhere, print it, store a new one, sign up somewhere, or log in somewhere.
 
 The agent is assumed to follow its instructions and to use `agentouch` the documented way. It may be
 fooled about *what* to ask for, but it is not trying to break `agentouch` itself.
@@ -46,6 +47,9 @@ fooled about *what* to ask for, but it is not trying to break `agentouch` itself
 - The binary is installed root-owned in a root-owned directory (below), so replacing it needs
   your password, and the agent calls it by its absolute path, `/usr/local/bin/agentouch`.
 - Programs in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` and `/bin` are trustworthy.
+- For `login`, you check the site in the prompt against the site you asked the agent to log in
+  to, and before storing the master password you mark accounts you'd never want an agent to touch
+  as "master password re-prompt" (or set their URI match to "Never") in Bitwarden.
 
 **In scope, handled:**
 
@@ -61,6 +65,7 @@ fooled about *what* to ask for, but it is not trying to break `agentouch` itself
 | Agent swaps in its own secret, or deletes yours | Fingerprint for every add and removal; the prompt says when a secret is being replaced |
 | Agent signs up with an ordinary address such as your Gmail | `login-new` takes only plain domains, and usernames that are plain or at an email-alias service |
 | Master password handed to a program | Stored under a reserved name that `run` can never deliver |
+| Injected instruction asks for one of your saved passwords | `login` hands out one password per touch, only for the exact site named in the prompt (subdomains and look-alikes get nothing), never for logins marked "master password re-prompt" or whose URI match is "Never" in Bitwarden, and only to the clipboard for 30 s |
 | Vault reachable from a web page, or left unlocked after a crash | `bw serve` listens only on a private Unix socket, never a network port; it is locked and stopped on exit, and a watcher kills it if `agentouch` is killed |
 | "Did the agent do something in my name?" | Every approval, decline and outcome is logged to `~/.config/agentouch/log` |
 
@@ -76,13 +81,21 @@ fooled about *what* to ask for, but it is not trying to break `agentouch` itself
   Use narrowly scoped tokens.
 - **Your whole vault, if you store the master password and approve a spoofed prompt.** Code
   running as you could show a sign-up-looking prompt and, after your touch, unseal the master
-  password. Storing it is optional: it is only needed for `login-new`.
+  password. Storing it is optional: it is only needed for `login-new` and `login`.
 - **Encodings and side channels beyond the four above**, files the command writes, and secrets
   shorter than 6 bytes (not redacted, to avoid mangling ordinary output).
 - **Other users or root on the same Mac, physical attacks, a compromised OS or Homebrew.**
-- **Pasting into the wrong page.** The sign-up password goes to the clipboard; keeping it on
-  the right site is the agent's instruction, not something `agentouch` enforces. It is a fresh
-  password, so the loss is limited to that one new account.
+- **Pasting into the wrong page.** Sign-up and login passwords go to the clipboard; keeping
+  them on the right site is the agent's instruction, not something `agentouch` enforces. For a
+  sign-up the password is fresh, so the loss is limited to that one new account; for `login` it
+  is that site's existing password.
+- **Reading a filled field back.** Once pasted, the password is in the page, where a
+  browser-driving agent could read the field. The example skill tells the agent never to read
+  password fields; `agentouch` can't enforce that.
+- **Clipboard readers.** While a password is on the clipboard (30 s for `login`, 90 s for
+  sign-ups, or until `agentouch clipboard-clear`), any process running as you can read it, and
+  Universal Clipboard may copy it to your other Apple devices. It is marked concealed, which
+  well-behaved clipboard managers skip.
 - **Brief exposure to your own processes during a save.** For about two seconds the unlocked
   vault is reachable through `bw serve` on a Unix socket that only your user can open. No
   network port is opened, so web pages and other users can't reach it; code running as you
@@ -154,7 +167,7 @@ agentouch login-new --site example.com --username quiet.fox@icloud.com --task "n
 refuses if a login for that site and username already exists, saves the new login to the
 folder "Agent sign-ups" with a note saying when and why, locks the vault, and puts the password
 on the clipboard (marked concealed, cleared after 90 s). It never edits or deletes vault items
-and prints nothing from the vault.
+and prints nothing from the vault; only `login` (below) hands out an existing password.
 
 The username must be a plain username or an address at an email-alias service (`aliasDomains` in
 `Sources/agentouch.swift`: iCloud Hide My Email, SimpleLogin, DuckDuckGo, Proton, addy.io,
@@ -172,10 +185,29 @@ save, because each plain `bw` command idles about two seconds before exiting in 
 
 Right after a sync, `bw` can briefly list no items at all
 ([bitwarden/clients#23283](https://github.com/bitwarden/clients/issues/23283)), so
-`login-new` looks again before believing an empty vault, rather than letting a duplicate
-through. This relies on `bw serve`'s REST API, which may change between Bitwarden CLI releases;
-over a socket it currently needs the header `Host: localhost:8087`
+`login-new` and `login` look again before believing an empty vault. This relies on `bw serve`'s
+REST API, which may change between Bitwarden CLI releases; over a socket it currently needs the
+header `Host: localhost:8087`
 ([bitwarden/clients#22867](https://github.com/bitwarden/clients/issues/22867)).
+
+## Logging in with saved logins
+
+```sh
+agentouch login --site example.com      # Touch ID; prints the username
+agentouch clipboard-clear               # right after pasting the password
+
+# if the site has several logins:
+agentouch login --site example.com --username me@icloud.com
+```
+
+`login` asks for one touch naming the site, unlocks the vault, finds the login whose saved URL
+host is exactly that site (or its `www.` form: name `accounts.google.com`, not `google.com`, if
+that's what the login is saved under), prints its username and puts its password on the
+clipboard for 30 seconds, then locks the vault. If several logins match, it prints their
+usernames instead and asks for `--username`. Logins you've marked "master password re-prompt",
+or whose URI match is "Never", are never handed out, so mark your critical accounts that way.
+If a browser extension can fill the form for you, that keeps the password off the clipboard
+entirely, but password-manager extensions usually ignore automated clicks.
 
 ## With Claude Code
 

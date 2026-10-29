@@ -14,12 +14,14 @@ do {
     case "password": try cmdPassword(Array(args.dropFirst()))
     case "set-master": try await cmdSetMaster(Array(args.dropFirst()))
     case "login-new": try await cmdLoginNew(Array(args.dropFirst()))
+    case "login": try await cmdLogin(Array(args.dropFirst()))
+    case "clipboard-clear": cmdClipboardClear()
     case "_reap":
         guard args.count == 4, let server = pid_t(args[1]), let parent = pid_t(args[2]) else { exit(1) }
         reap(server: server, parent: parent, directory: args[3])
     case "_clear-clipboard":
-        sleep(90)
-        if String(NSPasteboard.general.changeCount) == args.dropFirst().first { NSPasteboard.general.clearContents() }
+        sleep(UInt32(min(max(Int(args.count > 2 ? args[2] : "") ?? 90, 5), 300)))
+        if args.count > 1, String(NSPasteboard.general.changeCount) == args[1] { NSPasteboard.general.clearContents() }
     case "rm": try await cmdRemove(Array(args.dropFirst()))
     case "run": exit(try await cmdRun(Array(args.dropFirst())))
     default:
@@ -37,6 +39,10 @@ do {
           agentouch login-new --site SITE --username NAME [--folder F] [--task WHY]
                                                        after Touch ID, save a new login with a fresh
                                                        password to Bitwarden; password onto the clipboard
+          agentouch login --site SITE [--username NAME]
+                                                       after Touch ID, put an existing Bitwarden login's
+                                                       password on the clipboard for 30 s
+          agentouch clipboard-clear                    clear a password agentouch put on the clipboard
           agentouch rm NAME                            delete a secret, after Touch ID
           agentouch run NAME[,NAME] -- PROG [ARGS...]  one Touch ID for the exact command shown
         """)
