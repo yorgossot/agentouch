@@ -250,7 +250,9 @@ final class Redactor {
     }
 }
 
-// Asks for a fingerprint (no password fallback, no reuse of an earlier touch). The returned
+// Asks for a fingerprint (no password fallback, no reuse of an earlier touch). macOS shows the
+// reason as "agentouch is trying to <reason>.", so each reason starts with a short action in
+// capitals that completes that sentence, with the details on their own lines below. The returned
 // context is authenticated and can unlock the Secure Enclave key without a second prompt.
 func approve(_ reason: String) async throws -> LAContext {
     let context = LAContext()
@@ -259,10 +261,10 @@ func approve(_ reason: String) async throws -> LAContext {
     do {
         try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason)
     } catch {
-        audit("declined: \(reason)")
+        audit("declined: \(reason.replacingOccurrences(of: "\n", with: " / "))")
         throw Fail("not approved (\(error.localizedDescription))")
     }
-    audit("approved: \(reason)")
+    audit("approved: \(reason.replacingOccurrences(of: "\n", with: " / "))")
     return context
 }
 
@@ -344,10 +346,13 @@ func cmdAdd(_ args: [String]) async throws {
     var store = try loadStore()
     // Every add needs a fingerprint, so a prompt-injected agent can't quietly swap in its
     // own value under a name the user trusts. The clipboard is read only after approval.
-    let replacing = store.secrets.contains { $0.name == name } ? ", replacing the existing one" : ""
-    let source = fromClipboard ? "the text on your clipboard" : "a secret"
-    let destination = hosts.map { " to \($0.joined(separator: ", "))" } ?? ""
-    _ = try await approve("store \(source) as “\(name)” for \(allow.joined(separator: ", "))\(destination)\(replacing)")
+    let replacing = store.secrets.contains { $0.name == name }
+    let destination = hosts.map { " → \($0.joined(separator: ", "))" } ?? ""
+    _ = try await approve("""
+        \(replacing ? "REPLACE THE SECRET" : "STORE A NEW SECRET") “\(name)”
+        for: \(allow.joined(separator: ", "))\(destination)
+        from: \(fromClipboard ? "your clipboard" : "what you paste or pipe in")
+        """)
 
     var secret = Secret(name: name, env: env, allow: allow, hosts: hosts, ephemeralKey: Data(), sealed: Data(), added: Date())
     let value = try readSecret(name: name, fromClipboard: fromClipboard)
@@ -356,7 +361,7 @@ func cmdAdd(_ args: [String]) async throws {
     store.secrets.removeAll { $0.name == name }
     store.secrets.append(secret)
     try save(store)
-    print("stored '\(name)' — usable with: \(allow.joined(separator: ", "))\(destination)")
+    print("stored '\(name)' — usable with: \(allow.joined(separator: ", "))\(hosts.map { " to \($0.joined(separator: ", "))" } ?? "")")
 }
 
 func generatePassword(length: Int) -> String {
@@ -665,8 +670,11 @@ func cmdSetMaster(_ args: [String]) async throws {
     let fromClipboard = args == ["--from-clipboard"]
     guard args.isEmpty || fromClipboard else { throw Fail("usage: agentouch set-master [--from-clipboard]") }
     var store = try loadStore()
-    let source = fromClipboard ? "the text on your clipboard" : "your Bitwarden master password"
-    _ = try await approve("store \(source) as the Bitwarden master password, used only by login-new and login")
+    _ = try await approve("""
+        STORE YOUR BITWARDEN MASTER PASSWORD
+        from: \(fromClipboard ? "your clipboard" : "what you type next")
+        used only by login-new and login
+        """)
     let value = try readSecret(name: "your Bitwarden master password", fromClipboard: fromClipboard)
     if fromClipboard || isatty(0) == 1 { NSPasteboard.general.clearContents() }
 
@@ -730,7 +738,13 @@ func cmdLoginNew(_ args: [String]) async throws {
     guard let masterSecret = store.secrets.first(where: { $0.name == masterName }) else {
         throw Fail("no Bitwarden master password stored — the user runs: agentouch set-master")
     }
-    let context = try await approve("create a Bitwarden login for \(site) as \(username) in “\(folder)” and put its new password on the clipboard")
+    let context = try await approve("""
+        CREATE A BITWARDEN LOGIN
+        site: \(site)
+        user: \(username)
+        folder: \(folder)
+        → its new password goes to the clipboard
+        """)
     let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: store.seKey, authenticationContext: context)
     let master = try open(masterSecret, with: seKey, sePublic: store.sePublicKey)
     context.invalidate()
@@ -802,8 +816,10 @@ func cmdLogin(_ args: [String]) async throws {
     guard let masterSecret = store.secrets.first(where: { $0.name == masterName }) else {
         throw Fail("no Bitwarden master password stored — the user runs: agentouch set-master")
     }
-    let who = plan.username.map { " as \($0)" } ?? ""
-    let context = try await approve("put your Bitwarden password for \(plan.site)\(who) on the clipboard for 30 s, to log in there")
+    let context = try await approve("""
+        LOG IN AS YOU on \(plan.site)
+        \(plan.username.map { "user: \($0)\n" } ?? "")→ your saved password goes to the clipboard for 30 s
+        """)
     let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: store.seKey, authenticationContext: context)
     let master = try open(masterSecret, with: seKey, sePublic: store.sePublicKey)
     let blocked = try store.secrets.first { $0.name == blockedName }.map { blockedIDs(in: try open($0, with: seKey, sePublic: store.sePublicKey)) } ?? []
@@ -836,7 +852,11 @@ func blockLogins(_ list: String) async throws {
     }
     var store = try loadStore()
     let existing = store.secrets.first { $0.name == blockedName }
-    let context = try await approve("block \(ids.count) Bitwarden login\(ids.count == 1 ? "" : "s") from agentouch login, so agents can never get those passwords (only adds protection)")
+    let context = try await approve("""
+        BLOCK \(ids.count) LOGIN\(ids.count == 1 ? "" : "S") FROM AGENTS
+        agentouch login will refuse \(ids.count == 1 ? "it" : "them")
+        (only adds protection)
+        """)
     var current: [String] = []
     if let existing {
         let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: store.seKey, authenticationContext: context)
@@ -920,11 +940,11 @@ func cmdProtect(_ args: [String]) async throws {
     }
     let review = args == ["--review"]
     let reason = review
-        ? "review your Bitwarden logins and notes in a window on this Mac, and mark the ones you tick as re-prompt"
+        ? "REVIEW YOUR BITWARDEN ITEMS\nin a window on this Mac, then mark\nthe ones you tick as re-prompt"
         : everything
-        ? "list the names and sites of ALL your Bitwarden logins and notes (no usernames or passwords), to pick which to protect"
-        : apply.map { "mark \($0.count) Bitwarden login\($0.count == 1 ? "" : "s") as “master password re-prompt” (only adds protection)" }
-        ?? "list the names and sites of your Bitwarden logins that look critical (email, banks, government…), to protect them"
+        ? "LIST ALL YOUR ACCOUNTS\nnames and sites of every Bitwarden\nlogin and note (no passwords)"
+        : apply.map { "MARK \($0.count) LOGIN\($0.count == 1 ? "" : "S") AS RE-PROMPT\nin Bitwarden (only adds protection)" }
+        ?? "LIST YOUR CRITICAL-LOOKING ACCOUNTS\nnames and sites (no passwords)"
     let context = try await approve(reason)
     let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: store.seKey, authenticationContext: context)
     let master = try open(masterSecret, with: seKey, sePublic: store.sePublicKey)
@@ -1041,9 +1061,9 @@ func cmdRemove(_ args: [String]) async throws {
     guard args.count == 1 else { throw Fail("usage: agentouch rm NAME") }
     var store = try loadStore()
     guard store.secrets.contains(where: { $0.name == args[0] }) else { throw Fail("no secret named '\(args[0])'") }
-    let what = args[0] == masterName ? "the stored Bitwarden master password"
-        : args[0] == blockedName ? "the list of critical logins blocked from agents (unblocking them all)" : "“\(args[0])”"
-    _ = try await approve("delete \(what) from agentouch")
+    _ = try await approve(args[0] == masterName ? "DELETE YOUR STORED MASTER PASSWORD\nfrom agentouch"
+        : args[0] == blockedName ? "UNBLOCK ALL YOUR CRITICAL LOGINS\nagents could ask for them again"
+        : "DELETE THE SECRET “\(args[0])”\nfrom agentouch")
     store.secrets.removeAll { $0.name == args[0] }
     try save(store)
     print("removed '\(args[0])'")
@@ -1095,8 +1115,8 @@ func planRun(_ args: [String], store: Store) throws -> RunPlan {
     // Where the secret goes comes first, so a swapped destination stands out.
     let list = names.map { "“\($0)”" }.joined(separator: ", ")
     let urlHosts = argv.compactMap { URL(string: $0)?.host }.filter { _ in !pinned.isEmpty }
-    let destination = urlHosts.isEmpty ? "" : " → \(Array(Set(urlHosts)).sorted().joined(separator: ", "))"
-    return RunPlan(secrets: secrets, path: path, argv: argv, shown: shown, prompt: "use \(list)\(destination) to run: \(shown)")
+    let action = urlHosts.isEmpty ? "USE \(list)" : "SEND \(list) TO \(Array(Set(urlHosts)).sorted().joined(separator: ", "))"
+    return RunPlan(secrets: secrets, path: path, argv: argv, shown: shown, prompt: "\(action)\nby running: \(shown)")
 }
 
 func cmdRun(_ args: [String]) async throws -> Int32 {

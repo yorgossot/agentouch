@@ -7,9 +7,14 @@ time.
 $ agentouch run gh-token -- gh pr list
 ```
 
-The Touch ID sheet reads roughly:
+The Touch ID sheet reads:
 
-> **Touch ID** · use “gh-token” to run: /opt/homebrew/bin/gh pr list
+> **agentouch is trying to USE “gh-token”**
+> **by running: /opt/homebrew/bin/gh pr list.**
+
+Every prompt starts with the action in capitals (`SEND “api-key” TO api.example.com`, `LOG IN AS
+YOU on example.com`, `CREATE A BITWARDEN LOGIN`, `BLOCK 3 LOGINS FROM AGENTS`), with the details
+on the lines below.
 
 The agent asks for a command. You see that exact command in the Touch ID prompt. Only after your
 touch does `agentouch` decrypt the token and hand it to that one process: as an environment variable
