@@ -740,10 +740,9 @@ func cmdLoginNew(_ args: [String]) async throws {
     }
     let context = try await approve("""
         CREATE A BITWARDEN LOGIN
-        site: \(site)
-        user: \(username)
-        folder: \(folder)
-        → its new password goes to the clipboard
+        ⟶ site: \(site)
+        ⟶ user: \(username)
+        in folder “\(folder)”; its new password goes to the clipboard
         """)
     let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: store.seKey, authenticationContext: context)
     let master = try open(masterSecret, with: seKey, sePublic: store.sePublicKey)
@@ -817,8 +816,9 @@ func cmdLogin(_ args: [String]) async throws {
         throw Fail("no Bitwarden master password stored — the user runs: agentouch set-master")
     }
     let context = try await approve("""
-        LOG IN AS YOU on \(plan.site)
-        \(plan.username.map { "user: \($0)\n" } ?? "")→ your saved password goes to the clipboard for 30 s
+        LOG IN AS YOU
+        ⟶ site: \(plan.site)
+        \(plan.username.map { "⟶ user: \($0)\n" } ?? "")your saved password for it goes to the clipboard for 30 s
         """)
     let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: store.seKey, authenticationContext: context)
     let master = try open(masterSecret, with: seKey, sePublic: store.sePublicKey)
