@@ -43,9 +43,9 @@ do {
           agentouch login --site SITE [--username NAME]
                                                        after Touch ID, put an existing Bitwarden login's
                                                        password on the clipboard for 30 s
-          agentouch protect [--apply ID[,ID]]
-                                                       after Touch ID, list logins that look critical, or
-                                                       mark them "master password re-prompt"
+          agentouch protect [--all | --apply ID[,ID]]
+                                                       after Touch ID, list logins that look critical (or
+                                                       all logins and notes), or mark them re-prompt
           agentouch clipboard-clear                    clear a password agentouch put on the clipboard
           agentouch rm NAME                            delete a secret, after Touch ID
           agentouch run NAME[,NAME] -- PROG [ARGS...]  one Touch ID for the exact command shown

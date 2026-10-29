@@ -22,9 +22,9 @@
 //   agentouch login --site SITE [--username NAME]
 //                                                after Touch ID, put an existing Bitwarden login's
 //                                                password on the clipboard for 30 s
-//   agentouch protect [--apply ID[,ID]]
-//                                                after Touch ID, list logins that look critical, or
-//                                                mark them "master password re-prompt"
+//   agentouch protect [--all | --apply ID[,ID]]
+//                                                after Touch ID, list logins that look critical (or
+//                                                all logins and notes), or mark them re-prompt
 //   agentouch clipboard-clear                    clear a password agentouch put on the clipboard
 //   agentouch rm NAME                            delete a secret, after Touch ID
 //   agentouch run NAME[,NAME] -- PROG [ARGS...]  one Touch ID for the exact command shown
@@ -829,6 +829,14 @@ func criticalCandidates(in items: [[String: Any]]) -> [[String: Any]] {
     }
 }
 
+// Every login and secure note not yet marked re-prompt, for `protect --all`.
+func unprotectedItems(in items: [[String: Any]]) -> [[String: Any]] {
+    items.filter {
+        ($0["reprompt"] as? Int ?? 0) == 0 && ($0["deletedDate"] == nil || $0["deletedDate"] is NSNull)
+            && ($0["login"] != nil || $0["secureNote"] != nil)
+    }
+}
+
 // Why an item can't be marked automatically, if it can't: a passkey or attachment (an edit
 // through bw could lose it, and neither can be recovered), a shared item (its permissions belong
 // to the organisation), or an archived or deleted one.
@@ -849,20 +857,24 @@ func protectBlocker(_ item: [String: Any]) -> String? {
 // hands them out. It only ever turns re-prompt on, and checks nothing else changed.
 func cmdProtect(_ args: [String]) async throws {
     let apply: [String]?
+    var everything = false
     switch args.count {
     case 0: apply = nil
+    case 1 where args[0] == "--all": apply = nil; everything = true
     case 2 where args[0] == "--apply":
         apply = args[1].lowercased().split(separator: ",").map(String.init)
         guard let ids = apply, !ids.isEmpty, ids.allSatisfy({ $0.range(of: #"^[0-9a-f-]{8,36}$"#, options: .regularExpression) != nil }) else {
             throw Fail("--apply needs item ids from `agentouch protect`, comma-separated")
         }
-    default: throw Fail("usage: agentouch protect [--apply ID[,ID...]]")
+    default: throw Fail("usage: agentouch protect [--all | --apply ID[,ID...]]")
     }
     let store = try loadStore()
     guard let masterSecret = store.secrets.first(where: { $0.name == masterName }) else {
         throw Fail("no Bitwarden master password stored — the user runs: agentouch set-master")
     }
-    let reason = apply.map { "mark \($0.count) Bitwarden login\($0.count == 1 ? "" : "s") as “master password re-prompt” (only adds protection)" }
+    let reason = everything
+        ? "list the names and sites of ALL your Bitwarden logins and notes (no usernames or passwords), to pick which to protect"
+        : apply.map { "mark \($0.count) Bitwarden login\($0.count == 1 ? "" : "s") as “master password re-prompt” (only adds protection)" }
         ?? "list the names and sites of your Bitwarden logins that look critical (email, banks, government…), to protect them"
     let context = try await approve(reason)
     let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: store.seKey, authenticationContext: context)
@@ -882,7 +894,7 @@ func cmdProtect(_ args: [String]) async throws {
             return "\(id)  \(item["name"] as? String ?? "?")  (\(hosts.sorted().joined(separator: ", ")))"
         }
         guard let apply else {
-            let found = criticalCandidates(in: items)
+            let found = everything ? unprotectedItems(in: items) : criticalCandidates(in: items)
             if found.isEmpty { print("no unprotected logins look critical") }
             for item in found { print(label(item) + (protectBlocker(item).map { "  — \($0): mark it yourself in Bitwarden" } ?? "")) }
             let already = items.filter { ($0["reprompt"] as? Int ?? 0) != 0 }.count

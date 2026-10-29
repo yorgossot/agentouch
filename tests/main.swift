@@ -173,6 +173,8 @@ check("flags critical sites by domain and by name", flagged.contains("a1") && fl
 check("leaves ordinary shops alone", !flagged.contains("a3"))
 check("skips logins already re-prompt, non-logins and deleted items", !flagged.contains("a4") && !flagged.contains("a5") && !flagged.contains("a6"))
 check("a look-alike domain isn't matched as Google", !flagged.contains("a7"))
+let everything = unprotectedItems(in: mixed + [["id": "n1", "name": "XMR", "reprompt": 0, "secureNote": ["type": 0]]]).compactMap { $0["id"] as? String }
+check("--all lists every unprotected login and note", Set(everything) == ["a1", "a2", "a3", "a7", "n1"], "\(everything)")
 check("passkey logins are left to the user", protectBlocker(["login": ["fido2Credentials": [["credentialId": "x"]]]]) != nil)
 check("shared logins are left to the user", protectBlocker(["organizationId": "org-1", "login": [:]]) != nil)
 check("logins with attachments are left to the user", protectBlocker(["attachments": [["id": "f"]], "login": [:]]) != nil)

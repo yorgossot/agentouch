@@ -213,6 +213,7 @@ To find and mark critical accounts in one go:
 
 ```sh
 agentouch protect                       # Touch ID; lists names and sites that look critical
+agentouch protect --all                 # Touch ID; lists every login and note (for an LLM to sort)
 agentouch protect --apply 1a2b3c4d,5e6f7a8b   # Touch ID; marks those "master password re-prompt"
 ```
 
