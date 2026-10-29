@@ -15,13 +15,26 @@ func itemHosts(_ item: [String: Any]) -> [String] {
     return Array(Set(uris.compactMap { ($0["uri"] as? String).flatMap(host) })).sorted()
 }
 
-// A note that holds 12–25 lower-case words reads like a wallet seed phrase (BIP-39 or Monero).
+// Text that holds 12–33 plain words reads like a wallet seed phrase (BIP-39, Monero's 25 words,
+// SLIP-39 shares), also when numbered ("1. abandon 2. ability") or capitalised.
 func looksLikeSeedPhrase(_ text: String) -> Bool {
-    let lines = text.split(whereSeparator: \.isNewline).map { $0.split(separator: " ") }
-    let candidates = lines + [text.split(whereSeparator: { $0 == " " || $0.isNewline })]
-    return candidates.contains { words in
-        (12...25).contains(words.count) && words.allSatisfy { $0.count >= 3 && $0.allSatisfy { $0.isASCII && $0.isLowercase } }
+    func words(_ chunk: Substring) -> [Substring] {
+        chunk.lowercased().split(whereSeparator: { $0 == " " || $0 == "\t" || $0.isNewline })
+            .map { $0.drop { $0.isNumber || $0.isPunctuation } }
+            .filter { !$0.isEmpty }
+            .map { Substring($0) }
     }
+    let chunks = text.split(whereSeparator: \.isNewline) + [Substring(text)]
+    return chunks.contains { chunk in
+        let w = words(chunk)
+        return (12...33).contains(w.count) && w.allSatisfy { $0.count >= 3 && $0.allSatisfy { $0.isASCII && $0.isLetter } }
+    }
+}
+
+// The free text of an item where a seed phrase could hide: its notes and custom field values.
+func itemText(_ item: [String: Any]) -> String {
+    let fields = (item["fields"] as? [[String: Any]] ?? []).compactMap { $0["value"] as? String }
+    return ([item["notes"] as? String ?? ""] + fields).joined(separator: "\n")
 }
 
 // Asks the on-device model which items are sensitive. Returns nil (with why) when it can't run.
@@ -45,7 +58,8 @@ func onDeviceFlags(_ items: [[String: Any]]) async -> (Set<String>?, String) {
             let list = batch.enumerated().map { index, item in
                 let hosts = itemHosts(item)
                 let kind = item["secureNote"] != nil ? "note" : "login"
-                return "\(index + 1). \(kind): \(item["name"] as? String ?? "")\(hosts.isEmpty ? "" : " (\(hosts.joined(separator: ", ")))")"
+                let line = "\(kind): \(item["name"] as? String ?? "")\(hosts.isEmpty ? "" : " (\(hosts.joined(separator: ", ")))")"
+                return "\(index + 1). \(line.prefix(150))"
             }.joined(separator: "\n")
             do {
                 let session = LanguageModelSession(instructions: instructions)
@@ -122,6 +136,8 @@ func reviewWindow(_ items: [[String: Any]], suggested: Set<String>, source: Stri
     let (scroll, boxes) = reviewList(items, suggested: suggested)
     alert.accessoryView = scroll
 
+    alert.window.level = .modalPanel  // in front of the terminal it was started from
+    alert.window.orderFrontRegardless()
     guard alert.runModal() == .alertFirstButtonReturn else { return nil }
     return boxes.filter { $0.0.state == .on }.map(\.1)
 }
@@ -135,10 +151,10 @@ func protectReview(_ master: Data) async throws {
     guard !candidates.isEmpty else { print("nothing to review: every login and note is already re-prompt"); return }
 
     let listed = Set(criticalCandidates(in: candidates).map(itemID))
-    let seeds = Set(candidates.filter { looksLikeSeedPhrase($0["notes"] as? String ?? "") }.map(itemID))
+    let seeds = Set(candidates.filter { looksLikeSeedPhrase(itemText($0)) }.map(itemID))
     let (model, modelSource) = await onDeviceFlags(candidates)
     let source = (model == nil ? ["the built-in list"] : [modelSource, "the built-in list"]).joined(separator: " and ")
-        + ", plus notes that look like seed phrases"
+        + ", plus items holding something that looks like a seed phrase"
     let suggested = listed.union(seeds).union(model ?? [])
     if model == nil { print("note: \(modelSource); suggesting from the built-in list only") }
 

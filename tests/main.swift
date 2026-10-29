@@ -195,6 +195,10 @@ check("a 25-word Monero seed on its own line is recognised",
       looksLikeSeedPhrase("my wallet:\n" + Array(repeating: "tobacco", count: 25).joined(separator: " ")))
 check("ordinary notes aren't seed phrases", !looksLikeSeedPhrase("Call the bank on Monday about the card. PIN is in the safe."))
 check("a short word list isn't a seed phrase", !looksLikeSeedPhrase("milk eggs bread butter"))
+check("a numbered, capitalised seed phrase is recognised",
+      looksLikeSeedPhrase((1...12).map { "\($0). Word\(String(repeating: "x", count: $0 % 3))abc".replacingOccurrences(of: "Word", with: "Seed") }.joined(separator: " ").replacingOccurrences(of: "x", with: "q")))
+check("a 33-word SLIP-39 share is recognised", looksLikeSeedPhrase(Array(repeating: "academic", count: 33).joined(separator: " ")))
+check("a seed in a hidden field is found", looksLikeSeedPhrase(itemText(["notes": "see field", "fields": [["name": "seed", "value": bip39, "type": 1]]])))
 
 let tmp = FileManager.default.temporaryDirectory.standardizedFileURL.path
 check("the watcher removes its own socket directory", isSocketDirectory("\(tmp)/agentouch.Ab12Cd"))
