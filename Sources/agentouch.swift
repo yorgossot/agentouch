@@ -823,9 +823,14 @@ let criticalDomains = [
     "trading212.com", "interactivebrokers.com", "github.com", "cloudflare.com", "godaddy.com",
     "namecheap.com", "amazonaws.com", "stripe.com", "amazon.com", "amazon.nl", "amazon.de", "facebook.com",
     "x.com", "cosmote.gr", "vodafone.gr", "vodafone.nl", "kpn.com", "odido.nl",
+    "bybit.com", "okx.com", "kucoin.com", "bitpanda.com", "bitstamp.net", "gemini.com", "crypto.com",
+    "ledger.com", "trezor.io", "metamask.io", "exodus.com", "blockchain.com", "nexo.com", "uphold.com",
+    "bitget.com", "mexc.com", "gate.io", "htx.com", "bitfinex.com", "phantom.app", "rabby.io", "zengo.com",
+    "trustwallet.com", "bitonic.nl", "anycoin.nl", "lykke.com", "etoro.com", "plus500.com",
 ]
 let criticalWords = ["bank", "gov", "tax", "belasting", "paypal", "crypto", "wallet", "broker", "invest",
-                     "pension", "pensioen", "verzeker", "insurance", "mail"]
+                     "pension", "pensioen", "verzeker", "insurance", "mail", "coin", "bitcoin", "ledger",
+                     "trezor", "metamask", "exchange", "defi", "swap", "seed", "trading", "stake"]
 
 func host(of uri: String) -> String? {
     (URL(string: uri)?.host ?? URL(string: "https://\(uri)")?.host)?.lowercased()
