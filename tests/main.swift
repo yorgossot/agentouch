@@ -135,7 +135,7 @@ let accounts: [[String: Any]] = [
 ]
 do {
     let one = try pickLogin(in: accounts, site: "shop.example", username: nil)
-    check("the site's only login is picked", one == ("me@icloud.com", "pw-shop"))
+    check("the site's only login is picked", one.username == "me@icloud.com" && one.password == "pw-shop")
     let chosen = try pickLogin(in: accounts, site: "multi.example", username: "HOME@icloud.com")
     check("--username picks among several", chosen.password == "pw-home")
 } catch {
@@ -199,6 +199,10 @@ check("a numbered, capitalised seed phrase is recognised",
       looksLikeSeedPhrase((1...12).map { "\($0). Word\(String(repeating: "x", count: $0 % 3))abc".replacingOccurrences(of: "Word", with: "Seed") }.joined(separator: " ").replacingOccurrences(of: "x", with: "q")))
 check("a 33-word SLIP-39 share is recognised", looksLikeSeedPhrase(Array(repeating: "academic", count: 33).joined(separator: " ")))
 check("a seed in a hidden field is found", looksLikeSeedPhrase(itemText(["notes": "see field", "fields": [["name": "seed", "value": bip39, "type": 1]]])))
+
+check("a blocked id matches by prefix", isBlocked("28acdaae-1111-2222", ["28acdaae"]))
+check("other ids aren't blocked", !isBlocked("38acdaae-1111", ["28acdaae"]) && !isBlocked("x", [""]))
+check("the blocked list round-trips", blockedIDs(in: Data("aaaaaaaa,bbbbbbbb".utf8)) == ["aaaaaaaa", "bbbbbbbb"])
 
 let tmp = FileManager.default.temporaryDirectory.standardizedFileURL.path
 check("the watcher removes its own socket directory", isSocketDirectory("\(tmp)/agentouch.Ab12Cd"))

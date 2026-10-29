@@ -398,6 +398,19 @@ func cmdPassword(_ args: [String]) throws {
 // so `run` can never hand it to a program; only `login-new` and `login` use it.
 let masterName = "_bitwarden-master"
 
+// Bitwarden logins that `login` never hands out, whatever the prompt says: the user's critical
+// accounts, which they log in to themselves. Stored sealed like a secret (ids, comma-separated),
+// under a reserved name with an empty allow-list.
+let blockedName = "_blocked-logins"
+
+func blockedIDs(in value: Data) -> [String] {
+    String(decoding: value, as: UTF8.self).split(separator: ",").map(String.init)
+}
+
+func isBlocked(_ id: String, _ blocked: [String]) -> Bool {
+    blocked.contains { !$0.isEmpty && id.lowercased().hasPrefix($0.lowercased()) }
+}
+
 // A short-lived `bw serve` on a Unix socket in a private (0700) directory. One Node start-up
 // instead of one per step (each `bw` command idles ~2 s before it exits), so a save takes ~3 s
 // instead of ~13 s. No network port is opened, so neither web pages nor other users can reach
@@ -627,7 +640,7 @@ func hasLogin(in items: [[String: Any]], site: String, username: String) -> Bool
 
 // The one login to use for a site: never an item marked "master password re-prompt" (the user
 // keeps those for themselves), and if there are several, only the one with the given username.
-func pickLogin(in items: [[String: Any]], site: String, username: String?) throws -> (username: String, password: String) {
+func pickLogin(in items: [[String: Any]], site: String, username: String?) throws -> (id: String, username: String, password: String) {
     var found = logins(in: items, site: site, forUse: true)
     guard !found.isEmpty else { throw Fail("no Bitwarden login for \(site)") }
     found.removeAll { ($0["reprompt"] as? Int ?? 0) != 0 }
@@ -645,7 +658,7 @@ func pickLogin(in items: [[String: Any]], site: String, username: String?) throw
         throw Fail("different passwords are saved for \(site) as \(name(found[0])); fix them in Bitwarden")
     }
     guard !password(found[0]).isEmpty else { throw Fail("the Bitwarden login for \(site) has no password") }
-    return (name(found[0]), password(found[0]))
+    return (found[0]["id"] as? String ?? "", name(found[0]), password(found[0]))
 }
 
 func cmdSetMaster(_ args: [String]) async throws {
@@ -793,6 +806,7 @@ func cmdLogin(_ args: [String]) async throws {
     let context = try await approve("put your Bitwarden password for \(plan.site)\(who) on the clipboard for 30 s, to log in there")
     let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: store.seKey, authenticationContext: context)
     let master = try open(masterSecret, with: seKey, sePublic: store.sePublicKey)
+    let blocked = try store.secrets.first { $0.name == blockedName }.map { blockedIDs(in: try open($0, with: seKey, sePublic: store.sePublicKey)) } ?? []
     context.invalidate()
 
     let chosen = try await Bitwarden.unlocked(master, redacting: [(name: "master password", value: master)]) { bw in
@@ -804,9 +818,39 @@ func cmdLogin(_ args: [String]) async throws {
         }
         return try pickLogin(in: items, site: plan.site, username: plan.username)
     }
+    guard !isBlocked(chosen.id, blocked) else {
+        audit("refused blocked login: \(plan.site)")
+        throw Fail("the login for \(plan.site) is on the user's critical list; agentouch won't hand it out, the user logs in themselves")
+    }
     try copyToClipboard(chosen.password, seconds: 30)
     audit("password to clipboard: \(plan.site) as \(chosen.username)")
     print("username: \(chosen.username)\nits password is on the clipboard for 30 s (agentouch clipboard-clear clears it now)")
+}
+
+// `protect --block ID,ID`: adds logins to the sealed list `login` refuses. Adding only; the
+// list is removed as a whole with `agentouch rm _blocked-logins`, after its own prompt.
+func blockLogins(_ list: String) async throws {
+    let ids = list.lowercased().split(separator: ",").map(String.init)
+    guard !ids.isEmpty, ids.allSatisfy({ $0.range(of: #"^[0-9a-f-]{8,36}$"#, options: .regularExpression) != nil }) else {
+        throw Fail("--block needs item ids from `agentouch protect --all`, comma-separated")
+    }
+    var store = try loadStore()
+    let existing = store.secrets.first { $0.name == blockedName }
+    let context = try await approve("block \(ids.count) Bitwarden login\(ids.count == 1 ? "" : "s") from agentouch login, so agents can never get those passwords (only adds protection)")
+    var current: [String] = []
+    if let existing {
+        let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: store.seKey, authenticationContext: context)
+        current = blockedIDs(in: try open(existing, with: seKey, sePublic: store.sePublicKey))
+    }
+    context.invalidate()
+    let merged = current + ids.filter { !current.contains($0) }
+    var secret = Secret(name: blockedName, env: "AGENTOUCH_BLOCKED", allow: [], ephemeralKey: Data(), sealed: Data(), added: Date())
+    try seal(Data(merged.joined(separator: ",").utf8), into: &secret, sePublic: store.sePublicKey)
+    store.secrets.removeAll { $0.name == blockedName }
+    store.secrets.append(secret)
+    try save(store)
+    audit("blocked logins: \(merged.count) in total")
+    print("\(merged.count) login\(merged.count == 1 ? " is" : "s are") blocked from agentouch login (\(merged.count - current.count) new)")
 }
 
 // MARK: Marking critical logins "master password re-prompt"
@@ -862,12 +906,13 @@ func cmdProtect(_ args: [String]) async throws {
     case 0: apply = nil
     case 1 where args[0] == "--all": apply = nil; everything = true
     case 1 where args[0] == "--review": apply = nil
+    case 2 where args[0] == "--block": return try await blockLogins(args[1])
     case 2 where args[0] == "--apply":
         apply = args[1].lowercased().split(separator: ",").map(String.init)
         guard let ids = apply, !ids.isEmpty, ids.allSatisfy({ $0.range(of: #"^[0-9a-f-]{8,36}$"#, options: .regularExpression) != nil }) else {
             throw Fail("--apply needs item ids from `agentouch protect`, comma-separated")
         }
-    default: throw Fail("usage: agentouch protect [--review | --all | --apply ID[,ID...]]")
+    default: throw Fail("usage: agentouch protect [--review | --all | --apply ID[,ID...] | --block ID[,ID...]]")
     }
     let store = try loadStore()
     guard let masterSecret = store.secrets.first(where: { $0.name == masterName }) else {
@@ -996,7 +1041,8 @@ func cmdRemove(_ args: [String]) async throws {
     guard args.count == 1 else { throw Fail("usage: agentouch rm NAME") }
     var store = try loadStore()
     guard store.secrets.contains(where: { $0.name == args[0] }) else { throw Fail("no secret named '\(args[0])'") }
-    let what = args[0] == masterName ? "the stored Bitwarden master password" : "“\(args[0])”"
+    let what = args[0] == masterName ? "the stored Bitwarden master password"
+        : args[0] == blockedName ? "the list of critical logins blocked from agents (unblocking them all)" : "“\(args[0])”"
     _ = try await approve("delete \(what) from agentouch")
     store.secrets.removeAll { $0.name == args[0] }
     try save(store)

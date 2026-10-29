@@ -65,7 +65,7 @@ fooled about *what* to ask for, but it is not trying to break `agentouch` itself
 | Agent swaps in its own secret, or deletes yours | Fingerprint for every add and removal; the prompt says when a secret is being replaced |
 | Agent signs up with an ordinary address such as your Gmail | `login-new` takes only plain domains, and usernames that are plain or at an email-alias service |
 | Master password handed to a program | Stored under a reserved name that `run` can never deliver |
-| Injected instruction asks for one of your saved passwords | `login` hands out one password per touch, only for the exact site named in the prompt (subdomains and look-alikes get nothing), never for logins marked "master password re-prompt" or whose URI match is "Never" in Bitwarden, and only to the clipboard for 30 s |
+| Injected instruction asks for one of your saved passwords | `login` hands out one password per touch, only for the exact site named in the prompt (subdomains and look-alikes get nothing), never for logins on your blocked list, marked "master password re-prompt" or with URI match "Never" in Bitwarden, and only to the clipboard for 30 s |
 | Vault reachable from a web page, or left unlocked after a crash | `bw serve` listens only on a private Unix socket, never a network port; it is locked and stopped on exit, and a watcher kills it if `agentouch` is killed |
 | "Did the agent do something in my name?" | Every approval, decline and outcome is logged to `~/.config/agentouch/log` |
 
@@ -209,7 +209,19 @@ or whose URI match is "Never", are never handed out, so mark your critical accou
 If a browser extension can fill the form for you, that keeps the password off the clipboard
 entirely, but password-manager extensions usually ignore automated clicks.
 
-To find and mark critical accounts in one go:
+To keep your most critical accounts away from agents without changing anything in Bitwarden,
+block them: `login` then refuses them outright, and you log in to those sites yourself.
+
+```sh
+agentouch protect --all > list.txt            # Touch ID; ids, names and sites, no passwords
+agentouch protect --block 1a2b3c4d,5e6f7a8b   # Touch ID; adds them to the blocked list
+```
+
+The blocked list is sealed like a secret, so it can't be edited behind agentouch's back; it only
+grows, and `agentouch rm _blocked-logins` removes it as a whole after its own prompt.
+
+To mark critical accounts "master password re-prompt" in Bitwarden instead (this also makes
+Bitwarden ask *you* for the master password when you use them):
 
 ```sh
 agentouch protect --review              # Touch ID; pick in a window, names stay on your Mac
