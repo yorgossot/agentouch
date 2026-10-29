@@ -57,7 +57,7 @@ refuses("config file", "-K isn't allowed") { _ = try run(["api", "--", "curl", "
 refuses("output file", "-o isn't allowed") { _ = try run(["api", "--", "curl", "-o", "/tmp/x", "https://\(pi)/"]) }
 refuses("redirects", "-L isn't allowed") { _ = try run(["api", "--", "curl", "-L", "https://\(pi)/"]) }
 refuses("--url", "--url isn't allowed") { _ = try run(["api", "--", "curl", "--url", "https://evil.example/"]) }
-refuses("combined flags", "-fsS isn't allowed") { _ = try run(["api", "--", "curl", "-fsS", "https://\(pi)/"]) }
+refuses("combined flags, with a hint", "write combined flags separately") { _ = try run(["api", "--", "curl", "-fsS", "https://\(pi)/"]) }
 refuses("option missing its value", "-H needs a value") { _ = try run(["api", "--", "curl", "-H"]) }
 refuses("secret with a printing program", "may only be used with: curl") { _ = try run(["api", "--", "cat"]) }
 refuses("upper-case program on a case-insensitive disk", "lower-case") { _ = try run(["loose", "--", "CURL", "https://a.example/"]) }
@@ -203,6 +203,7 @@ check("a seed in a hidden field is found", looksLikeSeedPhrase(itemText(["notes"
 check("a blocked id matches by prefix", isBlocked("28acdaae-1111-2222", ["28acdaae"]))
 check("other ids aren't blocked", !isBlocked("38acdaae-1111", ["28acdaae"]) && !isBlocked("x", [""]))
 check("the blocked list round-trips", blockedIDs(in: Data("aaaaaaaa,bbbbbbbb".utf8)) == ["aaaaaaaa", "bbbbbbbb"])
+check("an empty blocked list stays empty", blockedIDs(in: Data()).isEmpty)
 
 let tmp = FileManager.default.temporaryDirectory.standardizedFileURL.path
 check("the watcher removes its own socket directory", isSocketDirectory("\(tmp)/agentouch.Ab12Cd"))

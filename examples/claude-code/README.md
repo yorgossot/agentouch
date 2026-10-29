@@ -4,7 +4,10 @@ Optional. They stop Claude from changing agentouch's store, log and binary, this
 Code's settings, and from running `sudo`, so changes to agentouch go through you. They guard
 against mistakes and prompt injection; they are not a sandbox.
 
-1. Copy the hook and make it executable (it needs `jq`):
+`./install.sh --claude-code` does steps 1 and 2 for you. By hand:
+
+1. Copy the hook and make it executable (it needs nothing beyond macOS, and blocks any command it
+   can't read):
 
    ```sh
    mkdir -p ~/.claude/hooks

@@ -37,4 +37,6 @@ expect deny  'ssh h x > >(sudo tee f)'
 expect deny  '$( ssh x) sudo y'
 expect deny  'cat > ~/.claude/hooks/agentouch-guard.sh'
 expect deny  'jq . ~/.claude/settings.json > /tmp/s && mv /tmp/s ~/.claude/settings.json'
+got=$(printf 'not json' | examples/claude-code/agentouch-guard.sh | grep -c '"deny"')
+if [ "$got" = 1 ]; then echo "ok   deny: unreadable input"; else echo "FAIL deny: unreadable input"; failures=$((failures + 1)); fi
 [ "$failures" = 0 ] && echo "all passed" || { echo "$failures failed"; exit 1; }

@@ -8,26 +8,7 @@
 //   The command-line entry point is main.swift; everything else lives here so the checks can
 //   be tested without Touch ID (tests/main.swift).
 //
-//   agentouch init                               create the Secure Enclave key (once)
-//   agentouch add NAME --allow PROG[,PROG] (--env VAR | --stdin) [--hosts H[,H]] [--from-clipboard]
-//                                                store a secret, after Touch ID (pasted hidden,
-//                                                piped in, or taken from the clipboard); --hosts
-//                                                pins where curl may send it
-//   agentouch list                               names and settings, never values
-//   agentouch password [--length N]              new password onto the clipboard, never printed
-//   agentouch set-master [--from-clipboard]      store the Bitwarden master password, after Touch ID
-//   agentouch login-new --site SITE --username NAME [--folder F] [--task WHY]
-//                                                after Touch ID, save a new login with a fresh
-//                                                password to Bitwarden; password onto the clipboard
-//   agentouch login --site SITE [--username NAME]
-//                                                after Touch ID, put an existing Bitwarden login's
-//                                                password on the clipboard for 30 s
-//   agentouch protect [--review | --all | --apply ID[,ID]]
-//                                                after Touch ID, pick items to mark re-prompt in a
-//                                                window (--review), or list them / mark by id
-//   agentouch clipboard-clear                    clear a password agentouch put on the clipboard
-//   agentouch rm NAME                            delete a secret, after Touch ID
-//   agentouch run NAME[,NAME] -- PROG [ARGS...]  one Touch ID for the exact command shown
+//   The commands are listed in main.swift (`agentouch help`).
 import AppKit
 import CryptoKit
 import Foundation
@@ -165,7 +146,11 @@ func checkCurl(_ args: ArraySlice<String>, hosts: Set<String>) throws {
         if curlValueOptions.contains(arg) {
             guard rest.popFirst() != nil else { throw Fail("\(arg) needs a value") }
         } else if arg.hasPrefix("-") {
-            guard curlFlagOptions.contains(arg) else { throw Fail("curl \(arg) isn't allowed with a host-pinned secret") }
+            guard curlFlagOptions.contains(arg) else {
+                let hint = arg.range(of: #"^-[A-Za-z]{2,}$"#, options: .regularExpression) != nil && !curlFlagOptions.contains(arg)
+                    ? " (write combined flags separately, e.g. -f -sS)" : ""
+                throw Fail("curl \(arg) isn't allowed with a host-pinned secret\(hint)")
+            }
         } else {
             guard let url = URL(string: arg), url.scheme == "https", url.user == nil, url.password == nil,
                   let host = url.host?.lowercased(), hosts.contains(host) else {
@@ -290,6 +275,9 @@ func readSecret(name: String, fromClipboard: Bool) throws -> Data {
 func cmdInit() throws {
     guard (try? loadStore()) == nil else { throw Fail("already set up (\(storeURL.path))") }
     guard SecureEnclave.isAvailable else { throw Fail("this Mac has no Secure Enclave") }
+    guard touchIDReady() else {
+        throw Fail("Touch ID isn't set up: enrol a fingerprint in System Settings → Touch ID & Password (a Mac without a built-in sensor needs a Magic Keyboard with Touch ID)")
+    }
     var error: Unmanaged<CFError>?
     guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
                                                        [.privateKeyUsage, .biometryAny], &error) else {
@@ -409,7 +397,7 @@ let masterName = "_bitwarden-master"
 let blockedName = "_blocked-logins"
 
 func blockedIDs(in value: Data) -> [String] {
-    String(decoding: value, as: UTF8.self).split(separator: ",").map(String.init)
+    String(decoding: value, as: UTF8.self).split(separator: ",").map(String.init).filter { !$0.isEmpty }
 }
 
 func isBlocked(_ id: String, _ blocked: [String]) -> Bool {
@@ -686,7 +674,7 @@ func cmdSetMaster(_ args: [String]) async throws {
     store.secrets.removeAll { $0.name == masterName }
     store.secrets.append(secret)
     try save(store)
-    print("stored — agentouch login-new can now save logins to Bitwarden")
+    print("stored. Next, choose which logins agents may never get: agentouch protect")
 }
 
 // Creates a Bitwarden login with a new password for a site, and puts the password on the
@@ -847,36 +835,6 @@ func cmdLogin(_ args: [String]) async throws {
     print("username: \(chosen.username)\nits password is on the clipboard for 30 s (agentouch clipboard-clear clears it now)")
 }
 
-// `protect --block ID,ID`: adds logins to the sealed list `login` refuses. Adding only; the
-// list is removed as a whole with `agentouch rm _blocked-logins`, after its own prompt.
-func blockLogins(_ list: String) async throws {
-    let ids = list.lowercased().split(separator: ",").map(String.init)
-    guard !ids.isEmpty, ids.allSatisfy({ $0.range(of: #"^[0-9a-f-]{8,36}$"#, options: .regularExpression) != nil }) else {
-        throw Fail("--block needs item ids from `agentouch protect --all`, comma-separated")
-    }
-    var store = try loadStore()
-    let existing = store.secrets.first { $0.name == blockedName }
-    let context = try await approve("""
-        BLOCK \(ids.count) LOGIN\(ids.count == 1 ? "" : "S") FROM AGENTS
-        agentouch login will refuse \(ids.count == 1 ? "it" : "them")
-        (only adds protection)
-        """)
-    var current: [String] = []
-    if let existing {
-        let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: store.seKey, authenticationContext: context)
-        current = blockedIDs(in: try open(existing, with: seKey, sePublic: store.sePublicKey))
-    }
-    context.invalidate()
-    let merged = current + ids.filter { !current.contains($0) }
-    var secret = Secret(name: blockedName, env: "AGENTOUCH_BLOCKED", allow: [], ephemeralKey: Data(), sealed: Data(), added: Date())
-    try seal(Data(merged.joined(separator: ",").utf8), into: &secret, sePublic: store.sePublicKey)
-    store.secrets.removeAll { $0.name == blockedName }
-    store.secrets.append(secret)
-    try save(store)
-    audit("blocked logins: \(merged.count) in total")
-    print("\(merged.count) login\(merged.count == 1 ? " is" : "s are") blocked from agentouch login (\(merged.count - current.count) new)")
-}
-
 // MARK: Marking critical logins "master password re-prompt"
 
 // criticalDomains and criticalWords live in critical.swift.
@@ -923,61 +881,119 @@ func protectBlocker(_ item: [String: Any]) -> String? {
 // `protect` lists the logins that look critical (names and sites, never passwords);
 // `protect --apply ID[,ID]` marks them "master password re-prompt", after which `login` never
 // hands them out. It only ever turns re-prompt on, and checks nothing else changed.
+// `protect` keeps critical logins away from agents. With no options it opens a window on this
+// Mac listing every login, with the blocked ones ticked; what's left ticked is blocked, so
+// `login` refuses it. Names stay in the window; only counts are printed.
+//   --suggest ID,ID          also pre-tick these (e.g. from examples/suggest-critical.sh)
+//   --block ID,ID            add to the list directly
+// Unblocking happens only in the window, which shows the names, and asks for a second touch.
+//   --reprompt               the window, but marking Bitwarden's "master password re-prompt"
+// For scripts, left out of help: --all lists every login and note by id, name and site (the
+// names go to whoever runs it), and --apply ID,ID marks those re-prompt.
 func cmdProtect(_ args: [String]) async throws {
-    let apply: [String]?
-    var everything = false
-    switch args.count {
-    case 0: apply = nil
-    case 1 where args[0] == "--all": apply = nil; everything = true
-    case 1 where args[0] == "--review": apply = nil
-    case 2 where args[0] == "--block": return try await blockLogins(args[1])
-    case 2 where args[0] == "--apply":
-        apply = args[1].lowercased().split(separator: ",").map(String.init)
-        guard let ids = apply, !ids.isEmpty, ids.allSatisfy({ $0.range(of: #"^[0-9a-f-]{8,36}$"#, options: .regularExpression) != nil }) else {
-            throw Fail("--apply needs item ids from `agentouch protect`, comma-separated")
+    func ids(_ list: String, _ flag: String) throws -> [String] {
+        let ids = list.lowercased().split(separator: ",").map(String.init)
+        guard !ids.isEmpty, ids.allSatisfy({ $0.range(of: #"^[0-9a-f-]{8,36}$"#, options: .regularExpression) != nil }) else {
+            throw Fail("\(flag) needs item ids, comma-separated")
         }
-    default: throw Fail("usage: agentouch protect [--review | --all | --apply ID[,ID...] | --block ID[,ID...]]")
+        return ids
     }
-    let store = try loadStore()
-    guard let masterSecret = store.secrets.first(where: { $0.name == masterName }) else {
+    enum Mode { case window([String]), reprompt, block([String]), all, apply([String]) }
+    let mode: Mode
+    switch (args.first, args.count) {
+    case (nil, 0): mode = .window([])
+    case ("--suggest"?, 2): mode = .window(try ids(args[1], "--suggest"))
+    case ("--reprompt"?, 1): mode = .reprompt
+    case ("--block"?, 2): mode = .block(try ids(args[1], "--block"))
+    case ("--all"?, 1): mode = .all
+    case ("--apply"?, 2): mode = .apply(try ids(args[1], "--apply"))
+    case ("--unblock"?, _): throw Fail("unblock in the window, which shows the names: agentouch protect")
+    default: throw Fail("usage: agentouch protect [--suggest ID,ID | --block ID,ID | --reprompt]")
+    }
+    func plural(_ n: Int) -> String { n == 1 ? "" : "S" }
+    let reason: String
+    var needsVault = true
+    switch mode {
+    case .window: reason = "CHOOSE LOGINS TO KEEP FROM AGENTS\nin a window on this Mac"
+    case .reprompt: reason = "CHOOSE LOGINS TO MARK RE-PROMPT\nin Bitwarden, in a window on this Mac"
+    case .block(let i): reason = "BLOCK \(i.count) LOGIN\(plural(i.count)) FROM AGENTS\nagentouch login will refuse them"; needsVault = false
+    case .all: reason = "LIST ALL YOUR ACCOUNTS\nnames and sites of every Bitwarden\nlogin and note (no passwords)"
+    case .apply(let i): reason = "MARK \(i.count) LOGIN\(plural(i.count)) AS RE-PROMPT\nin Bitwarden (only adds protection)"
+    }
+    var store = try loadStore()
+    let masterSecret = store.secrets.first { $0.name == masterName }
+    if needsVault, masterSecret == nil {
         throw Fail("no Bitwarden master password stored — the user runs: agentouch set-master")
     }
-    let review = args == ["--review"]
-    let reason = review
-        ? "REVIEW YOUR BITWARDEN ITEMS\nin a window on this Mac, then mark\nthe ones you tick as re-prompt"
-        : everything
-        ? "LIST ALL YOUR ACCOUNTS\nnames and sites of every Bitwarden\nlogin and note (no passwords)"
-        : apply.map { "MARK \($0.count) LOGIN\($0.count == 1 ? "" : "S") AS RE-PROMPT\nin Bitwarden (only adds protection)" }
-        ?? "LIST YOUR CRITICAL-LOOKING ACCOUNTS\nnames and sites (no passwords)"
     let context = try await approve(reason)
     let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: store.seKey, authenticationContext: context)
-    let master = try open(masterSecret, with: seKey, sePublic: store.sePublicKey)
+    let blockedSecret = store.secrets.first { $0.name == blockedName }
+    let blocked = try blockedSecret.map { blockedIDs(in: try open($0, with: seKey, sePublic: store.sePublicKey)) } ?? []
+    let master = needsVault ? try masterSecret.map { try open($0, with: seKey, sePublic: store.sePublicKey) } : nil
     context.invalidate()
-    if review { return try await protectReview(master) }
 
+    switch mode {
+    case .block(let i):
+        let new = i.filter { !isBlocked($0, blocked) }
+        store = try loadStore()  // in case something else changed it while the prompt was up
+        try saveBlocked(blocked + new, &store)
+        print("\(blocked.count + new.count) login\(blocked.count + new.count == 1 ? " is" : "s are") blocked from agents (\(new.count) new)")
+    case .window(let suggest):
+        guard let master, let result = try await blockWindow(master, blocked: blocked, firstRun: blockedSecret == nil, suggest: suggest) else {
+            print("cancelled; nothing was changed")
+            return
+        }
+        // Unticking unblocks, which gives agents something back, so it needs its own touch.
+        if result.removed > 0 {
+            let again = try await approve("UNBLOCK \(result.removed) LOGIN\(plural(result.removed))\nyou unticked in the window;\nagents could ask for \(result.removed == 1 ? "it" : "them") again")
+            again.invalidate()
+        }
+        store = try loadStore()  // in case something else changed it while the window was open
+        try saveBlocked(result.list, &store)
+        audit("blocked logins: \(result.added) added, \(result.removed) removed")
+        print("\(result.list.count) login\(result.list.count == 1 ? " is" : "s are") blocked from agents (\(result.added) added, \(result.removed) removed)")
+    case .reprompt:
+        if let master { try await protectReview(master) }
+    case .all:
+        if let master { try await protectByID(master, apply: nil) }
+    case .apply(let i):
+        if let master { try await protectByID(master, apply: i) }
+    }
+}
+
+// Replaces the sealed blocked list. An empty list is kept too, so a later window knows it isn't
+// a first run.
+func saveBlocked(_ ids: [String], _ store: inout Store) throws {
+    var secret = Secret(name: blockedName, env: "AGENTOUCH_BLOCKED", allow: [], ephemeralKey: Data(), sealed: Data(), added: Date())
+    try seal(Data(ids.joined(separator: ",").utf8), into: &secret, sePublic: store.sePublicKey)
+    store.secrets.removeAll { $0.name == blockedName }
+    store.secrets.append(secret)
+    try save(store)
+    audit("blocked logins: \(ids.count) in total")
+}
+
+// `protect --all` and `--apply`, for scripts: list every unprotected item by id, name and site,
+// or mark the given ids re-prompt.
+func protectByID(_ master: Data, apply: [String]?) async throws {
     try await Bitwarden.unlocked(master, redacting: [(name: "master password", value: master)]) { bw in
         let items = try await freshItems(bw)
         func label(_ item: [String: Any]) -> String {
-            let id = (item["id"] as? String ?? "").prefix(8)
-            let hosts = Set(((item["login"] as? [String: Any])?["uris"] as? [[String: Any]] ?? []).compactMap { ($0["uri"] as? String).flatMap(host) })
-            return "\(id)  \(item["name"] as? String ?? "?")  (\(hosts.sorted().joined(separator: ", ")))"
+            "\(itemID(item).prefix(8))  \(item["secureNote"] != nil ? "note: " : "")\(item["name"] as? String ?? "?")  (\(itemHosts(item).joined(separator: ", ")))"
         }
         guard let apply else {
-            let found = everything ? unprotectedItems(in: items) : criticalCandidates(in: items)
-            if found.isEmpty { print("no unprotected logins look critical") }
-            for item in found { print(label(item) + (protectBlocker(item).map { "  — \($0): mark it yourself in Bitwarden" } ?? "")) }
-            let already = items.filter { ($0["reprompt"] as? Int ?? 0) != 0 }.count
-            print("\(found.count) to consider; \(already) already re-prompt. Mark with: agentouch protect --apply ID,ID")
+            let found = unprotectedItems(in: items)
+            for item in found { print(label(item) + (protectBlocker(item).map { "  — \($0)" } ?? "")) }
+            print("\(found.count) logins and notes")
             return
         }
         for prefix in apply {
-            let matches = items.filter { ($0["id"] as? String ?? "").lowercased().hasPrefix(prefix) }
-            guard matches.count == 1, let id = matches[0]["id"] as? String else {
+            let matches = items.filter { itemID($0).lowercased().hasPrefix(prefix) }
+            guard matches.count == 1 else {
                 print("\(prefix): \(matches.isEmpty ? "no such item" : "matches several items; give more of the id")")
                 continue
             }
             let name = label(matches[0])
-            switch markReprompt(id, bw) {
+            switch markReprompt(itemID(matches[0]), bw) {
             case .marked(let note): print("\(name): marked re-prompt\(note)")
             case .already: print("\(name): already re-prompt")
             case .skipped(let why): print("\(name): skipped, it \(why); mark it yourself in Bitwarden")
@@ -1050,6 +1066,74 @@ func cmdClipboardClear() {
     }
 }
 
+func touchIDReady() -> Bool {
+    var error: NSError?
+    return LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
+}
+
+// `doctor`: checks this Mac's setup and says what to fix. Returns false if something essential
+// is missing. Needs no Touch ID and reads no secrets.
+func cmdDoctor() -> Bool {
+    var essentialOK = true
+    func line(_ ok: Bool?, _ text: String, essential: Bool = false) {
+        print("\(ok == nil ? "–" : ok! ? "✓" : "✗") \(text)")
+        if ok == false && essential { essentialOK = false }
+    }
+    let fm = FileManager.default
+    func owner(_ path: String) -> String? { (try? fm.attributesOfItem(atPath: path))?[.ownerAccountName] as? String }
+
+    line(SecureEnclave.isAvailable, "Secure Enclave", essential: true)
+    line(touchIDReady(), touchIDReady() ? "Touch ID enrolled" : "Touch ID isn't set up (System Settings → Touch ID & Password)", essential: true)
+    let store = try? loadStore()
+    line(store != nil, store.map { "set up, \($0.secrets.filter { !$0.name.hasPrefix("_") }.count) secret(s) stored" } ?? "not set up: run agentouch init", essential: true)
+
+    let me = Bundle.main.executableURL?.resolvingSymlinksInPath().path ?? "?"
+    let installed = "/usr/local/bin/agentouch"
+    line(me == installed ? true : nil, me == installed ? "running \(installed)" : "running \(me), not \(installed) (agents should call \(installed))")
+    if fm.fileExists(atPath: installed) {
+        line(owner(installed) == "root", owner(installed) == "root" ? "\(installed) is owned by root" : "\(installed) is owned by \(owner(installed) ?? "?"), so it can be replaced without your password", essential: true)
+        line(owner("/usr/local/bin") == "root", owner("/usr/local/bin") == "root" ? "/usr/local/bin is owned by root" : "/usr/local/bin is owned by \(owner("/usr/local/bin") ?? "?"); see the README's Install section", essential: true)
+    } else {
+        line(false, "\(installed) isn't installed: run ./install.sh", essential: true)
+    }
+
+    if let bw = resolve("bw") {
+        let process = Process(), out = Pipe()
+        process.executableURL = URL(fileURLWithPath: bw)
+        process.arguments = ["status"]
+        process.environment = scrubbedEnvironment().merging(["BW_NOINTERACTION": "true"]) { _, b in b }
+        process.standardOutput = out
+        process.standardError = FileHandle.nullDevice
+        let status = (try? process.run()).flatMap { _ -> String? in
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["status"] as? String
+        }
+        line(status == nil ? false : status != "unauthenticated", status == "unauthenticated" ? "Bitwarden CLI isn't logged in: run bw login" : "Bitwarden CLI \(status ?? "didn't answer")")
+        let master = store?.secrets.contains { $0.name == masterName } ?? false
+        line(master ? true : nil, master ? "master password stored" : "master password not stored (only needed for Bitwarden: agentouch set-master)")
+        let blocked = store?.secrets.contains { $0.name == blockedName } ?? false
+        line(blocked ? true : nil, blocked ? "a blocked-logins list is set (agentouch protect to view or change it)" : "no blocked logins yet (agentouch protect)")
+    } else {
+        line(nil, "Bitwarden CLI not installed (only needed for sign-ups and logins)")
+    }
+
+    let home = fm.homeDirectoryForCurrentUser.path
+    let hook = "\(home)/.claude/hooks/agentouch-guard.sh"
+    if fm.fileExists(atPath: "\(home)/.claude") {
+        let settings = (try? String(contentsOfFile: "\(home)/.claude/settings.json", encoding: .utf8)) ?? ""
+        let hooked = fm.isExecutableFile(atPath: hook) && settings.contains("agentouch-guard")
+        let old = ((try? String(contentsOfFile: hook, encoding: .utf8)) ?? "").contains("jq -r")
+        if hooked && old {
+            line(false, "Claude Code guard hook is an old version that allows everything when jq is missing (./install.sh --claude-code replaces it)")
+        } else {
+            line(hooked ? true : nil, hooked ? "Claude Code guard hook installed" : "Claude Code guard hook not installed (./install.sh --claude-code)")
+        }
+    }
+    print(essentialOK ? "\nready" : "\nfix the ✗ lines above")
+    return essentialOK
+}
+
 func cmdList() throws {
     let store = try loadStore()
     if store.secrets.isEmpty { print("no secrets yet — add one with: agentouch add NAME --allow PROG --env VAR") }
@@ -1064,9 +1148,9 @@ func cmdList() throws {
 func cmdRemove(_ args: [String]) async throws {
     guard args.count == 1 else { throw Fail("usage: agentouch rm NAME") }
     var store = try loadStore()
+    guard args[0] != blockedName else { throw Fail("change the blocked logins with: agentouch protect (or --unblock ID)") }
     guard store.secrets.contains(where: { $0.name == args[0] }) else { throw Fail("no secret named '\(args[0])'") }
     _ = try await approve(args[0] == masterName ? "DELETE YOUR STORED MASTER PASSWORD\nfrom agentouch"
-        : args[0] == blockedName ? "UNBLOCK ALL YOUR CRITICAL LOGINS\nagents could ask for them again"
         : "DELETE THE SECRET “\(args[0])”\nfrom agentouch")
     store.secrets.removeAll { $0.name == args[0] }
     try save(store)
