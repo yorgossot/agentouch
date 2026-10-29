@@ -1,12 +1,10 @@
 // `agentouch protect --review`: suggest which Bitwarden items to protect and let the user tick
-// them in a window on this Mac. Names never leave the Mac: suggestions come from Apple's
-// on-device model (when Apple Intelligence is on), the built-in lists and a seed-phrase check,
-// and the agent that ran the command only sees counts.
+// them in a window on this Mac. Names never leave the Mac: suggestions come from the built-in
+// lists and a seed-phrase check, and the agent that ran the command only sees counts. (Apple's
+// on-device model was tried and dropped: about half its answers were wrong, and it refuses
+// items it deems sensitive, which is the point here.)
 import AppKit
 import Foundation
-#if canImport(FoundationModels)
-import FoundationModels
-#endif
 
 func itemID(_ item: [String: Any]) -> String { item["id"] as? String ?? "" }
 
@@ -35,47 +33,6 @@ func looksLikeSeedPhrase(_ text: String) -> Bool {
 func itemText(_ item: [String: Any]) -> String {
     let fields = (item["fields"] as? [[String: Any]] ?? []).compactMap { $0["value"] as? String }
     return ([item["notes"] as? String ?? ""] + fields).joined(separator: "\n")
-}
-
-// Asks the on-device model which items are sensitive. Returns nil (with why) when it can't run.
-func onDeviceFlags(_ items: [[String: Any]]) async -> (Set<String>?, String) {
-    #if canImport(FoundationModels)
-    if #available(macOS 26.0, *) {
-        guard case .available = SystemLanguageModel.default.availability else {
-            return (nil, "Apple's on-device model isn't available (is Apple Intelligence on?)")
-        }
-        let instructions = """
-        You help a person protect their password manager. An item is SENSITIVE if someone who got into it \
-        could take money, take over other accounts, impersonate the person, or cause tax or legal trouble: \
-        email and Apple, Google or Microsoft accounts; password managers and authenticators; banks; payments \
-        and wallets; brokers; crypto exchanges, wallets, keys and seed phrases (including Monero or XMR); \
-        government and tax; health insurance; mobile carriers; domains and hosting; developer accounts; payroll. \
-        Shops, forums, streaming, games, newsletters and food delivery are NOT sensitive.
-        """
-        var flagged = Set<String>(), failures = 0
-        for start in stride(from: 0, to: items.count, by: 20) {
-            let batch = Array(items[start..<min(start + 20, items.count)])
-            let list = batch.enumerated().map { index, item in
-                let hosts = itemHosts(item)
-                let kind = item["secureNote"] != nil ? "note" : "login"
-                let line = "\(kind): \(item["name"] as? String ?? "")\(hosts.isEmpty ? "" : " (\(hosts.joined(separator: ", ")))")"
-                return "\(index + 1). \(line.prefix(150))"
-            }.joined(separator: "\n")
-            do {
-                let session = LanguageModelSession(instructions: instructions)
-                let reply = try await session.respond(to: "Items:\n\(list)\n\nReply with only the numbers of the SENSITIVE items, comma-separated, or NONE.")
-                for n in reply.content.split(whereSeparator: { !$0.isNumber }).compactMap({ Int($0) })
-                where (1...batch.count).contains(n) {
-                    flagged.insert(itemID(batch[n - 1]))
-                }
-            } catch {
-                failures += 1
-            }
-        }
-        return (flagged, failures == 0 ? "Apple's on-device model" : "Apple's on-device model (it skipped \(failures) batch\(failures == 1 ? "" : "es"))")
-    }
-    #endif
-    return (nil, "Apple's on-device model needs macOS 26")
 }
 
 final class FlippedView: NSView { override var isFlipped: Bool { true } }
@@ -152,11 +109,8 @@ func protectReview(_ master: Data) async throws {
 
     let listed = Set(criticalCandidates(in: candidates).map(itemID))
     let seeds = Set(candidates.filter { looksLikeSeedPhrase(itemText($0)) }.map(itemID))
-    let (model, modelSource) = await onDeviceFlags(candidates)
-    let source = (model == nil ? ["the built-in list"] : [modelSource, "the built-in list"]).joined(separator: " and ")
-        + ", plus items holding something that looks like a seed phrase"
-    let suggested = listed.union(seeds).union(model ?? [])
-    if model == nil { print("note: \(modelSource); suggesting from the built-in list only") }
+    let source = "the built-in list of sensitive sites, plus items holding something that looks like a seed phrase"
+    let suggested = listed.union(seeds)
 
     guard let chosen = await MainActor.run(body: { reviewWindow(candidates, suggested: suggested, source: source) }) else {
         print("cancelled; nothing was changed")

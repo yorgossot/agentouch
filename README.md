@@ -226,9 +226,10 @@ organisation (mark those yourself), since editing them through the Bitwarden CLI
 Export your vault before the first change, and try it on a throwaway login first.
 
 `--review` is the private way: it reads the vault, locks it again, and opens a window on your Mac
-listing every login and note, with suggestions ticked. Suggestions come from Apple's on-device
-model when Apple Intelligence is on (nothing leaves the Mac), the built-in lists, and notes that
-look like wallet seed phrases. You adjust the ticks; it unlocks once more to mark them and
+listing every login and note, with suggestions ticked. Suggestions come from the built-in lists
+and from items whose notes or fields look like a wallet seed phrase; untick false alarms and
+tick anything they missed. (Apple's on-device model was tried for this and dropped: it got about
+half its answers wrong and refuses items it considers sensitive.) You adjust the ticks; it unlocks once more to mark them and
 prints only counts, so an agent that ran it never learns which banks or services you use. The
 other forms print names and sites to whoever runs them.
 
