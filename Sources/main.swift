@@ -15,8 +15,8 @@ do {
     case "set-master": try await cmdSetMaster(Array(args.dropFirst()))
     case "login-new": try await cmdLoginNew(Array(args.dropFirst()))
     case "_reap":
-        guard args.count == 3, let server = pid_t(args[1]), let parent = pid_t(args[2]) else { exit(1) }
-        reap(server: server, parent: parent)
+        guard args.count == 4, let server = pid_t(args[1]), let parent = pid_t(args[2]) else { exit(1) }
+        reap(server: server, parent: parent, directory: args[3])
     case "_clear-clipboard":
         sleep(90)
         if String(NSPasteboard.general.changeCount) == args.dropFirst().first { NSPasteboard.general.clearContents() }

@@ -61,7 +61,7 @@ fooled about *what* to ask for, but it is not trying to break `agentouch` itself
 | Agent swaps in its own secret, or deletes yours | Fingerprint for every add and removal; the prompt says when a secret is being replaced |
 | Agent signs up with an ordinary address such as your Gmail | `login-new` takes only plain domains, and usernames that are plain or at an email-alias service |
 | Master password handed to a program | Stored under a reserved name that `run` can never deliver |
-| Vault left unlocked after a crash | `bw serve` is locked and stopped on exit, and a watcher kills it if `agentouch` is killed |
+| Vault reachable from a web page, or left unlocked after a crash | `bw serve` listens only on a private Unix socket, never a network port; it is locked and stopped on exit, and a watcher kills it if `agentouch` is killed |
 | "Did the agent do something in my name?" | Every approval, decline and outcome is logged to `~/.config/agentouch/log` |
 
 **Out of scope, not handled:**
@@ -83,10 +83,10 @@ fooled about *what* to ask for, but it is not trying to break `agentouch` itself
 - **Pasting into the wrong page.** The sign-up password goes to the clipboard; keeping it on
   the right site is the agent's instruction, not something `agentouch` enforces. It is a fresh
   password, so the loss is limited to that one new account.
-- **Brief local exposure during a save.** For about two seconds the unlocked vault is reachable
-  by local processes through `bw serve` on a random loopback port. Web pages can't call it (it
-  refuses requests with an `Origin` header); only a top-level navigation that guessed the
-  random port within those seconds could show vault data in a browser tab.
+- **Brief exposure to your own processes during a save.** For about two seconds the unlocked
+  vault is reachable through `bw serve` on a Unix socket that only your user can open. No
+  network port is opened, so web pages and other users can't reach it; code running as you
+  could, which is already out of scope above.
 
 ## Install
 
@@ -164,10 +164,18 @@ the list and rebuild.
 
 The master password is stored like any other secret but under a reserved name with no allowed
 programs, so `agentouch run` can never hand it out. Vault access goes through a short-lived
-`bw serve` bound to a random loopback port: it refuses requests that carry an `Origin` header
-(so web pages can't call it), is locked and stopped before `agentouch` returns, and is killed by a
-watcher process if `agentouch` is killed first. It relies on `bw serve`'s REST API, which may change
-between Bitwarden CLI releases.
+`bw serve` listening on a Unix socket in a private (0700) temporary directory, so no network
+port is ever opened. It is locked and stopped before `agentouch` returns, and a watcher process
+stops it and removes the socket if `agentouch` is killed first. One process serves the whole
+save, because each plain `bw` command idles about two seconds before exiting in Bitwarden CLI
+2026.10 ([fixed upstream](https://github.com/bitwarden/clients/pull/23953)).
+
+Right after a sync, `bw` can briefly list no items at all
+([bitwarden/clients#23283](https://github.com/bitwarden/clients/issues/23283)), so
+`login-new` looks again before believing an empty vault, rather than letting a duplicate
+through. This relies on `bw serve`'s REST API, which may change between Bitwarden CLI releases;
+over a socket it currently needs the header `Host: localhost:8087`
+([bitwarden/clients#22867](https://github.com/bitwarden/clients/issues/22867)).
 
 ## With Claude Code
 

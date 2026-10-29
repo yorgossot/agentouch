@@ -106,6 +106,24 @@ check("Hide My Email alias", (try? login("example.com", "quiet.fox@icloud.com"))
 check("other alias service", (try? login("example.com", "x1@duck.com")) != nil)
 check("plain username", (try? login("example.com", "quietfox")) != nil)
 
+// MARK: duplicate logins
+
+let vault: [[String: Any]] = [
+    ["login": ["username": "Quiet.Fox@icloud.com", "uris": [["uri": "https://www.example.com/signup"]]]],
+    ["login": ["username": "other", "uris": [["uri": "shop.example.org"]]]],
+]
+check("same site and username is a duplicate", hasLogin(in: vault, site: "example.com", username: "quiet.fox@icloud.com"))
+check("www. and case don't matter", hasLogin(in: vault, site: "www.example.com", username: "QUIET.FOX@icloud.com"))
+check("URIs without a scheme are understood", hasLogin(in: vault, site: "shop.example.org", username: "other"))
+check("another username isn't a duplicate", !hasLogin(in: vault, site: "example.com", username: "someone.else@icloud.com"))
+check("another site isn't a duplicate", !hasLogin(in: vault, site: "example.net", username: "quiet.fox@icloud.com"))
+check("a subdomain isn't the same site", !hasLogin(in: vault, site: "evil.example.com", username: "quiet.fox@icloud.com"))
+let tmp = FileManager.default.temporaryDirectory.standardizedFileURL.path
+check("the watcher removes its own socket directory", isSocketDirectory("\(tmp)/agentouch.Ab12Cd"))
+check("the watcher refuses a path that climbs out", !isSocketDirectory("\(tmp)/agentouch.Ab12Cd/../.."))
+check("the watcher refuses other directories", !isSocketDirectory("\(tmp)/other") && !isSocketDirectory("/Users/agentouch.Ab12Cd"))
+check("chunked replies are decoded", dechunk(Data("4\r\n{\"a\"\r\n3\r\n:1}\r\n0\r\n\r\n".utf8)) == Data("{\"a\":1}".utf8))
+
 // MARK: redaction
 
 let value = Data("s3cr3t-Value_42/+=".utf8)

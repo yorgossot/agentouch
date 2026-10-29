@@ -391,38 +391,45 @@ func cmdPassword(_ args: [String]) throws {
 // so `run` can never hand it to a program; only `login-new` uses it.
 let masterName = "_bitwarden-master"
 
-// A short-lived `bw serve` on a random loopback port. One Node start-up instead of one per
-// step (each `bw` command idles ~2 s before it exits), so a save takes ~3 s instead of ~13 s.
-// It refuses requests that carry an Origin header, so web pages can't reach it, and it is
-// locked and stopped before agentouch returns. On Ctrl-C a signal handler stops it; if agentouch is
-// killed outright, a small watcher process (`agentouch _reap`) does.
+// A short-lived `bw serve` on a Unix socket in a private (0700) directory. One Node start-up
+// instead of one per step (each `bw` command idles ~2 s before it exits), so a save takes ~3 s
+// instead of ~13 s. No network port is opened, so neither web pages nor other users can reach
+// it, and it is locked and stopped before agentouch returns. On Ctrl-C a signal handler stops
+// it; if agentouch is killed outright, a small watcher process (`agentouch _reap`) does.
 nonisolated(unsafe) var serverPid: pid_t = 0  // for the signal handler
 
 final class Bitwarden {
     let process = Process()
     let reaper = Process()
-    let base: URL
-    let session: URLSession
+    let directory: URL
+    let socketPath: String
     let secrets: [(name: String, value: Data)]
 
     init(redacting secrets: [(name: String, value: Data)]) throws {
         guard let path = resolve("bw") else { throw Fail("bw (Bitwarden CLI) not found") }
-        let port = try freePort()
-        base = URL(string: "http://127.0.0.1:\(port)")!
-        let config = URLSessionConfiguration.ephemeral
-        config.connectionProxyDictionary = [:]  // no proxies at all, not even SOCKS
-        session = URLSession(configuration: config)
+        var template = Array(FileManager.default.temporaryDirectory.appendingPathComponent("agentouch.XXXXXX").path.utf8CString)
+        guard let made = mkdtemp(&template) else { throw Fail("couldn't create a private directory for bw serve") }
+        directory = URL(fileURLWithPath: String(cString: made))
+        chmod(directory.path, 0o700)
+        socketPath = directory.appendingPathComponent("bw.sock").path
+        guard socketPath.utf8.count < 104 else {
+            try? FileManager.default.removeItem(at: directory)
+            throw Fail("temporary directory path too long for a socket")
+        }
         self.secrets = secrets
         process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = ["serve", "--hostname", "127.0.0.1", "--port", String(port)]
+        process.arguments = ["serve", "--hostname", "unix://\(socketPath)"]
         process.environment = scrubbedEnvironment().merging(["BW_NOINTERACTION": "true"]) { _, b in b }
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        try process.run()
+        do { try process.run() } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
         serverPid = process.processIdentifier
         reaper.executableURL = Bundle.main.executableURL
-        reaper.arguments = ["_reap", String(process.processIdentifier), String(getpid())]
+        reaper.arguments = ["_reap", String(process.processIdentifier), String(getpid()), directory.path]
         reaper.standardOutput = FileHandle.nullDevice
         reaper.standardError = FileHandle.nullDevice
         try? reaper.run()
@@ -440,26 +447,28 @@ final class Bitwarden {
         let bw = try Bitwarden(redacting: secrets)
         do {
             try await bw.waitUntilReady()
-            _ = try await bw.call("POST", "/unlock", ["password": String(decoding: master, as: UTF8.self)])
+            _ = try bw.call("POST", "/unlock", ["password": String(decoding: master, as: UTF8.self)])
             let result = try await body(bw)
-            await bw.stop()
+            bw.stop()
             return result
         } catch {
-            await bw.stop()
+            bw.stop()
             throw error
         }
     }
 
-    // Waits for a reply that is really bw's status, from our still-running server, so the master
-    // password never goes to something else that took the port in the meantime.
+    // Waits for a reply that is really bw's status, from our still-running server.
     func waitUntilReady() async throws {
         for _ in 0..<300 {
             guard process.isRunning else { throw Fail("bw serve exited before it was ready") }
-            if let (data, _) = try? await session.data(from: base.appendingPathComponent("status")) {
+            if let (status, data) = try? request("GET", "/status", nil) {
+                if status == 403 {
+                    throw Fail("bw serve refused the request (HTTP 403): its Host allow-list may have changed in this Bitwarden CLI version (see README)")
+                }
                 let reply = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
                 let template = ((reply?["data"] as? [String: Any])?["template"] as? [String: Any])
                 guard reply?["success"] as? Bool == true, template?["status"] is String, process.isRunning else {
-                    throw Fail("something other than bw answered on its port; nothing was sent")
+                    throw Fail("something other than bw answered on its socket; nothing was sent")
                 }
                 return
             }
@@ -469,43 +478,104 @@ final class Bitwarden {
     }
 
     // Calls the API and returns its "data" object. Errors are shown with the secrets redacted.
-    func call(_ method: String, _ path: String, _ body: [String: Any]? = nil) async throws -> [String: Any] {
-        var request = URLRequest(url: URL(string: path, relativeTo: base)!)
-        request.httpMethod = method
-        request.timeoutInterval = 60
-        if let body {
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        }
-        let (data, _) = try await session.data(for: request)
+    func call(_ method: String, _ path: String, _ body: [String: Any]? = nil) throws -> [String: Any] {
+        let (status, data) = try request(method, path, try body.map { try JSONSerialization.data(withJSONObject: $0) })
         let reply = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
         guard reply["success"] as? Bool == true else {
             let r = Redactor(secrets)
             let text = Data(((reply["message"] as? String) ?? String(decoding: data, as: UTF8.self)).utf8)
             let message = String(decoding: r.feed(text) + r.flush(), as: UTF8.self)
-            throw Fail("Bitwarden \(path) failed: \(message.trimmingCharacters(in: .whitespacesAndNewlines))")
+            throw Fail("Bitwarden \(path) failed (HTTP \(status)): \(message.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
         return reply["data"] as? [String: Any] ?? [:]
     }
 
-    func list(_ object: String, _ query: String = "") async throws -> [[String: Any]] {
-        try await call("GET", "/list/object/\(object)\(query)")["data"] as? [[String: Any]] ?? []
+    func list(_ object: String) throws -> [[String: Any]] {
+        try call("GET", "/list/object/\(object)")["data"] as? [[String: Any]] ?? []
     }
 
-    func stop() async {
-        _ = try? await call("POST", "/lock")
+    // One HTTP/1.1 request over the socket. bw serve checks the Host header even on a socket and
+    // only accepts localhost:<its --port>, 8087 by default (bitwarden/clients#22867).
+    func request(_ method: String, _ path: String, _ body: Data?) throws -> (Int, Data) {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw Fail("no socket") }
+        defer { close(fd) }
+        var timeout = timeval(tv_sec: 60, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { raw in
+            raw.copyBytes(from: socketPath.utf8.prefix(raw.count - 1))
+        }
+        let connected = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0 }
+        }
+        guard connected else { throw Fail("couldn't connect to bw serve") }
+
+        var head = "\(method) \(path) HTTP/1.1\r\nHost: localhost:8087\r\nConnection: close\r\n"
+        if let body { head += "Content-Type: application/json\r\nContent-Length: \(body.count)\r\n" }
+        let message = Data((head + "\r\n").utf8) + (body ?? Data())
+        try message.withUnsafeBytes { raw in
+            var sent = 0
+            while sent < raw.count {
+                let n = write(fd, raw.baseAddress! + sent, raw.count - sent)
+                guard n > 0 else { throw Fail("couldn't send to bw serve") }
+                sent += n
+            }
+        }
+
+        var response = Data()
+        var buffer = [UInt8](repeating: 0, count: 65536)
+        while true {
+            let n = read(fd, &buffer, buffer.count)
+            if n == 0 { break }
+            if n < 0 {
+                if errno == EINTR { continue }
+                throw Fail(errno == EAGAIN ? "bw serve didn't answer within 60 s" : "couldn't read from bw serve")
+            }
+            response.append(buffer, count: n)
+            guard response.count <= 64 << 20 else { throw Fail("bw serve's reply was too large") }
+        }
+        guard let split = response.range(of: Data("\r\n\r\n".utf8)),
+              let statusLine = String(data: response[..<split.lowerBound], encoding: .utf8)?.split(separator: "\r\n").first,
+              let status = Int(statusLine.split(separator: " ").dropFirst().first ?? "") else {
+            throw Fail("bw serve sent a malformed reply")
+        }
+        let headers = String(decoding: response[..<split.lowerBound], as: UTF8.self).lowercased()
+        var payload = Data(response[split.upperBound...])
+        if headers.contains("transfer-encoding: chunked") { payload = dechunk(payload) }
+        return (status, payload)
+    }
+
+    func stop() {
+        _ = try? call("POST", "/lock")
         process.terminate()
         for _ in 0..<30 where process.isRunning { usleep(100_000) }
         if process.isRunning { kill(process.processIdentifier, SIGKILL) }
         process.waitUntilExit()
         serverPid = 0
         if reaper.isRunning { reaper.terminate() }
+        try? FileManager.default.removeItem(at: directory)
     }
 }
 
-// `agentouch _reap SERVER PARENT`: stops bw serve if agentouch dies without stopping it, and after 120 s
-// in any case.
-func reap(server: pid_t, parent: pid_t) {
+func dechunk(_ data: Data) -> Data {
+    var out = Data(), rest = data[...]
+    while let lineEnd = rest.range(of: Data("\r\n".utf8)),
+          let size = Int(String(decoding: rest[..<lineEnd.lowerBound], as: UTF8.self).split(separator: ";").first ?? "", radix: 16),
+          size > 0 {
+        let start = lineEnd.upperBound
+        guard rest.distance(from: start, to: rest.endIndex) >= size else { break }
+        let end = rest.index(start, offsetBy: size)
+        out.append(contentsOf: rest[start..<end])
+        rest = rest[rest.index(end, offsetBy: min(2, rest.distance(from: end, to: rest.endIndex)))...]
+    }
+    return out
+}
+
+// `agentouch _reap SERVER PARENT DIR`: stops bw serve if agentouch dies without stopping it, and
+// after 120 s in any case, then removes its socket directory.
+func reap(server: pid_t, parent: pid_t, directory: String) {
     let deadline = Date().addingTimeInterval(120)
     while kill(server, 0) == 0, kill(parent, 0) == 0, Date() < deadline { usleep(200_000) }
     if kill(server, 0) == 0 {
@@ -513,22 +583,28 @@ func reap(server: pid_t, parent: pid_t) {
         for _ in 0..<20 where kill(server, 0) == 0 { usleep(100_000) }
         if kill(server, 0) == 0 { kill(server, SIGKILL) }
     }
+    if isSocketDirectory(directory) { try? FileManager.default.removeItem(atPath: directory) }
 }
 
-func freePort() throws -> UInt16 {
-    let fd = socket(AF_INET, SOCK_STREAM, 0)
-    guard fd >= 0 else { throw Fail("no socket") }
-    defer { close(fd) }
-    var addr = sockaddr_in()
-    addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-    addr.sin_family = sa_family_t(AF_INET)
-    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-    var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-    let ok = withUnsafeMutablePointer(to: &addr) {
-        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, len) == 0 && getsockname(fd, $0, &len) == 0 }
+// Only a directory that bw serve's mkdtemp could have made: agentouch.XXXXXX directly in TMPDIR.
+func isSocketDirectory(_ path: String) -> Bool {
+    let url = URL(fileURLWithPath: path).standardizedFileURL
+    return url.deletingLastPathComponent().path == FileManager.default.temporaryDirectory.standardizedFileURL.path
+        && url.lastPathComponent.range(of: #"^agentouch\.[A-Za-z0-9]{6}$"#, options: .regularExpression) != nil
+}
+
+// Whether the vault already has a login for this site (or its www. form) and username.
+func hasLogin(in items: [[String: Any]], site: String, username: String) -> Bool {
+    func bare(_ host: String) -> String { host.hasPrefix("www.") ? String(host.dropFirst(4)) : host }
+    return items.contains { item in
+        guard let login = item["login"] as? [String: Any],
+              (login["username"] as? String)?.lowercased() == username.lowercased() else { return false }
+        let uris = (login["uris"] as? [[String: Any]] ?? []).compactMap { $0["uri"] as? String }
+        return uris.contains { uri in
+            let host = URL(string: uri)?.host ?? URL(string: "https://\(uri)")?.host
+            return host.map { bare($0.lowercased()) == bare(site) } ?? false
+        }
     }
-    guard ok else { throw Fail("couldn't find a free port") }
-    return UInt16(bigEndian: addr.sin_port)
 }
 
 func cmdSetMaster(_ args: [String]) async throws {
@@ -608,14 +684,21 @@ func cmdLoginNew(_ args: [String]) async throws {
     let secrets = [(name: "master password", value: master), (name: "password", value: Data(password.utf8))]
 
     try await Bitwarden.unlocked(master, redacting: secrets) { bw in
-        _ = try await bw.call("POST", "/sync")
-        let existing = try await bw.list("items", "?url=https://\(site)")
-        if existing.contains(where: { (($0["login"] as? [String: Any])?["username"] as? String)?.lowercased() == username.lowercased() }) {
+        _ = try bw.call("POST", "/sync")
+        // Right after a sync bw can briefly list nothing at all (bitwarden/clients#23283), which
+        // would let a duplicate through, so an empty vault is checked again before it's believed
+        // (costing ~3 s per sign-up while the vault really is empty).
+        var items = try bw.list("items")
+        for _ in 0..<4 where items.isEmpty {
+            try await Task.sleep(nanoseconds: 750_000_000)
+            items = try bw.list("items")
+        }
+        if hasLogin(in: items, site: site, username: username) {
             throw Fail("Bitwarden already has a login for \(site) as \(username); nothing was created")
         }
-        var folderId = try await bw.list("folders").first { $0["name"] as? String == folder }?["id"] as? String
+        var folderId = try bw.list("folders").first { $0["name"] as? String == folder }?["id"] as? String
         if folderId == nil {
-            folderId = try await bw.call("POST", "/object/folder", ["name": folder])["id"] as? String
+            folderId = try bw.call("POST", "/object/folder", ["name": folder])["id"] as? String
         }
         let date = Date().formatted(date: .abbreviated, time: .omitted)
         let item: [String: Any] = [
@@ -624,7 +707,7 @@ func cmdLoginNew(_ args: [String]) async throws {
             "login": ["username": username, "password": password, "totp": NSNull(),
                       "uris": [["match": NSNull(), "uri": "https://\(site)"]]],
         ]
-        guard try await bw.call("POST", "/object/item", item)["id"] != nil else {
+        guard try bw.call("POST", "/object/item", item)["id"] != nil else {
             throw Fail("Bitwarden didn't confirm the new item — check the \(folder) folder")
         }
     }
