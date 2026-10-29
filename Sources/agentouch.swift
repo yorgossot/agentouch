@@ -22,6 +22,9 @@
 //   agentouch login --site SITE [--username NAME]
 //                                                after Touch ID, put an existing Bitwarden login's
 //                                                password on the clipboard for 30 s
+//   agentouch protect [--apply ID[,ID]]
+//                                                after Touch ID, list logins that look critical, or
+//                                                mark them "master password re-prompt"
 //   agentouch clipboard-clear                    clear a password agentouch put on the clipboard
 //   agentouch rm NAME                            delete a secret, after Touch ID
 //   agentouch run NAME[,NAME] -- PROG [ARGS...]  one Touch ID for the exact command shown
@@ -804,6 +807,138 @@ func cmdLogin(_ args: [String]) async throws {
     try copyToClipboard(chosen.password, seconds: 30)
     audit("password to clipboard: \(plan.site) as \(chosen.username)")
     print("username: \(chosen.username)\nits password is on the clipboard for 30 s (agentouch clipboard-clear clears it now)")
+}
+
+// MARK: Marking critical logins "master password re-prompt"
+
+// Sites whose logins are worth keeping away from agents: email, identity, password managers,
+// money, government. A suggestion list for `protect`; the user picks which to mark.
+let criticalDomains = [
+    "apple.com", "icloud.com", "google.com", "gmail.com", "microsoft.com", "live.com", "outlook.com",
+    "proton.me", "protonmail.com", "tuta.com", "fastmail.com", "yahoo.com", "bitwarden.com", "1password.com",
+    "paypal.com", "revolut.com", "wise.com", "n26.com", "bunq.com", "ing.nl", "ing.com", "abnamro.nl",
+    "rabobank.nl", "snsbank.nl", "asnbank.nl", "triodos.nl", "knab.nl", "piraeusbank.gr", "alpha.gr",
+    "eurobank.gr", "nbg.gr", "digid.nl", "overheid.nl", "belastingdienst.nl", "gov.gr", "gsis.gr",
+    "coinbase.com", "kraken.com", "binance.com", "bitvavo.com", "degiro.nl", "degiro.com",
+    "trading212.com", "interactivebrokers.com", "github.com", "cloudflare.com", "godaddy.com",
+    "namecheap.com", "amazonaws.com", "stripe.com", "amazon.com", "amazon.nl", "amazon.de", "facebook.com",
+    "x.com", "cosmote.gr", "vodafone.gr", "vodafone.nl", "kpn.com", "odido.nl",
+]
+let criticalWords = ["bank", "gov", "tax", "belasting", "paypal", "crypto", "wallet", "broker", "invest",
+                     "pension", "pensioen", "verzeker", "insurance", "mail"]
+
+func host(of uri: String) -> String? {
+    (URL(string: uri)?.host ?? URL(string: "https://\(uri)")?.host)?.lowercased()
+}
+
+// Personal logins that look critical and aren't marked re-prompt yet.
+func criticalCandidates(in items: [[String: Any]]) -> [[String: Any]] {
+    items.filter { item in
+        guard let login = item["login"] as? [String: Any], (item["reprompt"] as? Int ?? 0) == 0,
+              item["deletedDate"] == nil || item["deletedDate"] is NSNull else { return false }
+        let hosts = (login["uris"] as? [[String: Any]] ?? []).compactMap { ($0["uri"] as? String).flatMap(host) }
+        let name = (item["name"] as? String ?? "").lowercased()
+        return hosts.contains { h in criticalDomains.contains { h == $0 || h.hasSuffix("." + $0) } }
+            || (hosts + [name]).contains { text in criticalWords.contains { text.contains($0) } }
+    }
+}
+
+// Why an item can't be marked automatically, if it can't: a passkey or attachment (an edit
+// through bw could lose it, and neither can be recovered), a shared item (its permissions belong
+// to the organisation), or an archived or deleted one.
+func protectBlocker(_ item: [String: Any]) -> String? {
+    if let passkeys = (item["login"] as? [String: Any])?["fido2Credentials"] as? [Any], !passkeys.isEmpty {
+        return "has a passkey"
+    }
+    if let attachments = item["attachments"] as? [Any], !attachments.isEmpty { return "has attachments" }
+    for key in ["archivedDate", "deletedDate"] where !(item[key] == nil || item[key] is NSNull) {
+        return key == "archivedDate" ? "is archived" : "is deleted"
+    }
+    if let org = item["organizationId"] as? String, !org.isEmpty { return "is shared through an organisation" }
+    return nil
+}
+
+// `protect` lists the logins that look critical (names and sites, never passwords);
+// `protect --apply ID[,ID]` marks them "master password re-prompt", after which `login` never
+// hands them out. It only ever turns re-prompt on, and checks nothing else changed.
+func cmdProtect(_ args: [String]) async throws {
+    let apply: [String]?
+    switch args.count {
+    case 0: apply = nil
+    case 2 where args[0] == "--apply":
+        apply = args[1].lowercased().split(separator: ",").map(String.init)
+        guard let ids = apply, !ids.isEmpty, ids.allSatisfy({ $0.range(of: #"^[0-9a-f-]{8,36}$"#, options: .regularExpression) != nil }) else {
+            throw Fail("--apply needs item ids from `agentouch protect`, comma-separated")
+        }
+    default: throw Fail("usage: agentouch protect [--apply ID[,ID...]]")
+    }
+    let store = try loadStore()
+    guard let masterSecret = store.secrets.first(where: { $0.name == masterName }) else {
+        throw Fail("no Bitwarden master password stored — the user runs: agentouch set-master")
+    }
+    let reason = apply.map { "mark \($0.count) Bitwarden login\($0.count == 1 ? "" : "s") as “master password re-prompt” (only adds protection)" }
+        ?? "list the names and sites of your Bitwarden logins that look critical (email, banks, government…), to protect them"
+    let context = try await approve(reason)
+    let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: store.seKey, authenticationContext: context)
+    let master = try open(masterSecret, with: seKey, sePublic: store.sePublicKey)
+    context.invalidate()
+
+    try await Bitwarden.unlocked(master, redacting: [(name: "master password", value: master)]) { bw in
+        _ = try bw.call("POST", "/sync")
+        var items = try bw.list("items")
+        for _ in 0..<4 where items.isEmpty {  // bitwarden/clients#23283
+            try await Task.sleep(nanoseconds: 750_000_000)
+            items = try bw.list("items")
+        }
+        func label(_ item: [String: Any]) -> String {
+            let id = (item["id"] as? String ?? "").prefix(8)
+            let hosts = Set(((item["login"] as? [String: Any])?["uris"] as? [[String: Any]] ?? []).compactMap { ($0["uri"] as? String).flatMap(host) })
+            return "\(id)  \(item["name"] as? String ?? "?")  (\(hosts.sorted().joined(separator: ", ")))"
+        }
+        guard let apply else {
+            let found = criticalCandidates(in: items)
+            if found.isEmpty { print("no unprotected logins look critical") }
+            for item in found { print(label(item) + (protectBlocker(item).map { "  — \($0): mark it yourself in Bitwarden" } ?? "")) }
+            let already = items.filter { ($0["reprompt"] as? Int ?? 0) != 0 }.count
+            print("\(found.count) to consider; \(already) already re-prompt. Mark with: agentouch protect --apply ID,ID")
+            return
+        }
+        for prefix in apply {
+            let matches = items.filter { ($0["id"] as? String ?? "").lowercased().hasPrefix(prefix) }
+            guard matches.count == 1, let id = matches[0]["id"] as? String else {
+                print("\(prefix): \(matches.isEmpty ? "no such item" : "matches several items; give more of the id")")
+                continue
+            }
+            do {  // one item's failure mustn't stop the rest
+                let before = try bw.call("GET", "/object/item/\(id)")
+                if (before["reprompt"] as? Int ?? 0) != 0 { print("\(label(before)): already re-prompt"); continue }
+                if let why = protectBlocker(before) { print("\(label(before)): skipped, it \(why); mark it yourself in Bitwarden"); continue }
+                var edited = before
+                edited["reprompt"] = 1
+                _ = try bw.call("PUT", "/object/item/\(id)", edited)
+                let after = try bw.call("GET", "/object/item/\(id)")
+                print("\(label(after)): \((after["reprompt"] as? Int ?? 0) == 1 ? "marked re-prompt" : "NOT marked")\(editNote(before: before, after: after))")
+                audit("marked re-prompt: \(id)")
+            } catch let f as Fail {
+                print("\(prefix): failed, \(f.message)")
+            }
+        }
+    }
+}
+
+// What else changed when only re-prompt was turned on: nothing, normally. The item key appearing
+// (Bitwarden upgrades keyless items on edit) and password history trimmed to its usual 5 are
+// expected; anything else is worth a look.
+func editNote(before: [String: Any], after: [String: Any]) -> String {
+    var a = after, b = before
+    for key in ["reprompt", "revisionDate", "key"] { a[key] = nil; b[key] = nil }
+    if NSDictionary(dictionary: a).isEqual(to: b) { return "" }
+    let historyBefore = b["passwordHistory"] as? [Any] ?? [], historyAfter = a["passwordHistory"] as? [Any] ?? []
+    a["passwordHistory"] = nil; b["passwordHistory"] = nil
+    if NSDictionary(dictionary: a).isEqual(to: b), historyAfter.count == 5, historyBefore.count > 5 {
+        return "; password history trimmed to 5 (normal)"
+    }
+    return "; WARNING: other fields changed, check this item in Bitwarden"
 }
 
 // Clears the clipboard if it holds a concealed item: agentouch's, or a password manager's.

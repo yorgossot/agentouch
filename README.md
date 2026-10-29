@@ -209,6 +209,22 @@ or whose URI match is "Never", are never handed out, so mark your critical accou
 If a browser extension can fill the form for you, that keeps the password off the clipboard
 entirely, but password-manager extensions usually ignore automated clicks.
 
+To find and mark critical accounts in one go:
+
+```sh
+agentouch protect                       # Touch ID; lists names and sites that look critical
+agentouch protect --apply 1a2b3c4d,5e6f7a8b   # Touch ID; marks those "master password re-prompt"
+```
+
+`protect` suggests logins for email, identity, password managers, banks, payments, brokers and
+government (`criticalDomains` and `criticalWords` in `Sources/agentouch.swift`); you choose which
+to mark. It only ever turns re-prompt on, sends each item back complete, re-reads it to check
+nothing else changed, and skips logins with a passkey or attachments, or shared through an
+organisation (mark those yourself), since editing them through the Bitwarden CLI could lose data.
+Export your vault before the first `--apply`, and try it on a throwaway login first. Run it in
+your own terminal if you'd rather not show an agent which banks and services you use; an agent
+only needs to know that re-prompt logins are refused.
+
 ## With Claude Code
 
 - [`examples/skill/SKILL.md`](examples/skill/SKILL.md) is a skill that teaches Claude to use

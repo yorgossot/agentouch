@@ -157,6 +157,36 @@ refuses("login site homoglyph", "--site") { _ = try planLogin(["--site", "shоp.
 refuses("login username with spaces", "--username") { _ = try planLogin(["--site", "shop.example", "--username", "a b"]) }
 check("valid login request", (try? planLogin(["--site", "Shop.Example"]))?.site == "shop.example")
 
+// MARK: protecting critical logins
+
+let mixed: [[String: Any]] = [
+    ["id": "a1", "name": "Google", "reprompt": 0, "login": ["uris": [["uri": "https://accounts.google.com"]]]],
+    ["id": "a2", "name": "My Bank", "reprompt": 0, "login": ["uris": [["uri": "https://online.example.nl"]]]],
+    ["id": "a3", "name": "Shop", "reprompt": 0, "login": ["uris": [["uri": "https://www.mediamarkt.nl"]]]],
+    ["id": "a4", "name": "Gmail", "reprompt": 1, "login": ["uris": [["uri": "https://mail.google.com"]]]],
+    ["id": "a5", "name": "Card", "reprompt": 0, "card": ["number": "x"]],
+    ["id": "a6", "name": "Tax", "reprompt": 0, "deletedDate": "2026-01-01", "login": ["uris": [["uri": "https://belastingdienst.nl"]]]],
+    ["id": "a7", "name": "notgoogle", "reprompt": 0, "login": ["uris": [["uri": "https://google.com.evil.example"]]]],
+]
+let flagged = criticalCandidates(in: mixed).compactMap { $0["id"] as? String }
+check("flags critical sites by domain and by name", flagged.contains("a1") && flagged.contains("a2"), "\(flagged)")
+check("leaves ordinary shops alone", !flagged.contains("a3"))
+check("skips logins already re-prompt, non-logins and deleted items", !flagged.contains("a4") && !flagged.contains("a5") && !flagged.contains("a6"))
+check("a look-alike domain isn't matched as Google", !flagged.contains("a7"))
+check("passkey logins are left to the user", protectBlocker(["login": ["fido2Credentials": [["credentialId": "x"]]]]) != nil)
+check("shared logins are left to the user", protectBlocker(["organizationId": "org-1", "login": [:]]) != nil)
+check("logins with attachments are left to the user", protectBlocker(["attachments": [["id": "f"]], "login": [:]]) != nil)
+check("archived logins are left alone", protectBlocker(["archivedDate": "2026-01-01", "login": [:]]) != nil)
+let item: [String: Any] = ["id": "x", "name": "Bank", "reprompt": 0, "revisionDate": "1", "login": ["username": "u", "uris": [["uri": "https://b.example", "match": 3]]],
+                           "passwordHistory": (1...6).map { ["password": "p\($0)"] }]
+var marked = item; marked["reprompt"] = 1; marked["revisionDate"] = "2"; marked["key"] = "k"
+check("only re-prompt changed: no note", editNote(before: item, after: marked) == "")
+var trimmed = marked; trimmed["passwordHistory"] = Array((item["passwordHistory"] as! [Any]).prefix(5))
+check("history trimmed to 5 is reported as normal", editNote(before: item, after: trimmed).contains("normal"))
+var lost = marked; lost["login"] = ["username": "u", "uris": [] as [Any]]
+check("a lost URI is a warning", editNote(before: item, after: lost).contains("WARNING"))
+check("ordinary personal logins can be marked", protectBlocker(["organizationId": NSNull(), "login": ["fido2Credentials": []]]) == nil)
+
 let tmp = FileManager.default.temporaryDirectory.standardizedFileURL.path
 check("the watcher removes its own socket directory", isSocketDirectory("\(tmp)/agentouch.Ab12Cd"))
 check("the watcher refuses a path that climbs out", !isSocketDirectory("\(tmp)/agentouch.Ab12Cd/../.."))
