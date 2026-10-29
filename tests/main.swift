@@ -189,6 +189,13 @@ var lost = marked; lost["login"] = ["username": "u", "uris": [] as [Any]]
 check("a lost URI is a warning", editNote(before: item, after: lost).contains("WARNING"))
 check("ordinary personal logins can be marked", protectBlocker(["organizationId": NSNull(), "login": ["fido2Credentials": []]]) == nil)
 
+let bip39 = "abandon ability able about above absent absorb abstract absurd abuse access accident"
+check("a 12-word seed phrase is recognised", looksLikeSeedPhrase(bip39))
+check("a 25-word Monero seed on its own line is recognised",
+      looksLikeSeedPhrase("my wallet:\n" + Array(repeating: "tobacco", count: 25).joined(separator: " ")))
+check("ordinary notes aren't seed phrases", !looksLikeSeedPhrase("Call the bank on Monday about the card. PIN is in the safe."))
+check("a short word list isn't a seed phrase", !looksLikeSeedPhrase("milk eggs bread butter"))
+
 let tmp = FileManager.default.temporaryDirectory.standardizedFileURL.path
 check("the watcher removes its own socket directory", isSocketDirectory("\(tmp)/agentouch.Ab12Cd"))
 check("the watcher refuses a path that climbs out", !isSocketDirectory("\(tmp)/agentouch.Ab12Cd/../.."))

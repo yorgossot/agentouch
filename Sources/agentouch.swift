@@ -22,9 +22,9 @@
 //   agentouch login --site SITE [--username NAME]
 //                                                after Touch ID, put an existing Bitwarden login's
 //                                                password on the clipboard for 30 s
-//   agentouch protect [--all | --apply ID[,ID]]
-//                                                after Touch ID, list logins that look critical (or
-//                                                all logins and notes), or mark them re-prompt
+//   agentouch protect [--review | --all | --apply ID[,ID]]
+//                                                after Touch ID, pick items to mark re-prompt in a
+//                                                window (--review), or list them / mark by id
 //   agentouch clipboard-clear                    clear a password agentouch put on the clipboard
 //   agentouch rm NAME                            delete a secret, after Touch ID
 //   agentouch run NAME[,NAME] -- PROG [ARGS...]  one Touch ID for the exact command shown
@@ -861,18 +861,22 @@ func cmdProtect(_ args: [String]) async throws {
     switch args.count {
     case 0: apply = nil
     case 1 where args[0] == "--all": apply = nil; everything = true
+    case 1 where args[0] == "--review": apply = nil
     case 2 where args[0] == "--apply":
         apply = args[1].lowercased().split(separator: ",").map(String.init)
         guard let ids = apply, !ids.isEmpty, ids.allSatisfy({ $0.range(of: #"^[0-9a-f-]{8,36}$"#, options: .regularExpression) != nil }) else {
             throw Fail("--apply needs item ids from `agentouch protect`, comma-separated")
         }
-    default: throw Fail("usage: agentouch protect [--all | --apply ID[,ID...]]")
+    default: throw Fail("usage: agentouch protect [--review | --all | --apply ID[,ID...]]")
     }
     let store = try loadStore()
     guard let masterSecret = store.secrets.first(where: { $0.name == masterName }) else {
         throw Fail("no Bitwarden master password stored — the user runs: agentouch set-master")
     }
-    let reason = everything
+    let review = args == ["--review"]
+    let reason = review
+        ? "review your Bitwarden logins and notes in a window on this Mac, and mark the ones you tick as re-prompt"
+        : everything
         ? "list the names and sites of ALL your Bitwarden logins and notes (no usernames or passwords), to pick which to protect"
         : apply.map { "mark \($0.count) Bitwarden login\($0.count == 1 ? "" : "s") as “master password re-prompt” (only adds protection)" }
         ?? "list the names and sites of your Bitwarden logins that look critical (email, banks, government…), to protect them"
@@ -880,14 +884,10 @@ func cmdProtect(_ args: [String]) async throws {
     let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: store.seKey, authenticationContext: context)
     let master = try open(masterSecret, with: seKey, sePublic: store.sePublicKey)
     context.invalidate()
+    if review { return try await protectReview(master) }
 
     try await Bitwarden.unlocked(master, redacting: [(name: "master password", value: master)]) { bw in
-        _ = try bw.call("POST", "/sync")
-        var items = try bw.list("items")
-        for _ in 0..<4 where items.isEmpty {  // bitwarden/clients#23283
-            try await Task.sleep(nanoseconds: 750_000_000)
-            items = try bw.list("items")
-        }
+        let items = try await freshItems(bw)
         func label(_ item: [String: Any]) -> String {
             let id = (item["id"] as? String ?? "").prefix(8)
             let hosts = Set(((item["login"] as? [String: Any])?["uris"] as? [[String: Any]] ?? []).compactMap { ($0["uri"] as? String).flatMap(host) })
@@ -907,20 +907,51 @@ func cmdProtect(_ args: [String]) async throws {
                 print("\(prefix): \(matches.isEmpty ? "no such item" : "matches several items; give more of the id")")
                 continue
             }
-            do {  // one item's failure mustn't stop the rest
-                let before = try bw.call("GET", "/object/item/\(id)")
-                if (before["reprompt"] as? Int ?? 0) != 0 { print("\(label(before)): already re-prompt"); continue }
-                if let why = protectBlocker(before) { print("\(label(before)): skipped, it \(why); mark it yourself in Bitwarden"); continue }
-                var edited = before
-                edited["reprompt"] = 1
-                _ = try bw.call("PUT", "/object/item/\(id)", edited)
-                let after = try bw.call("GET", "/object/item/\(id)")
-                print("\(label(after)): \((after["reprompt"] as? Int ?? 0) == 1 ? "marked re-prompt" : "NOT marked")\(editNote(before: before, after: after))")
-                audit("marked re-prompt: \(id)")
-            } catch let f as Fail {
-                print("\(prefix): failed, \(f.message)")
+            let name = label(matches[0])
+            switch markReprompt(id, bw) {
+            case .marked(let note): print("\(name): marked re-prompt\(note)")
+            case .already: print("\(name): already re-prompt")
+            case .skipped(let why): print("\(name): skipped, it \(why); mark it yourself in Bitwarden")
+            case .failed(let why): print("\(name): failed, \(why)")
             }
         }
+    }
+}
+
+// Bitwarden's items after a sync. Right after one, bw can briefly list nothing at all
+// (bitwarden/clients#23283), so an empty list is checked again before it's believed.
+func freshItems(_ bw: Bitwarden) async throws -> [[String: Any]] {
+    _ = try bw.call("POST", "/sync")
+    var items = try bw.list("items")
+    for _ in 0..<4 where items.isEmpty {
+        try await Task.sleep(nanoseconds: 750_000_000)
+        items = try bw.list("items")
+    }
+    return items
+}
+
+enum MarkOutcome { case marked(String), already, skipped(String), failed(String) }
+
+// Turns re-prompt on for one item, sending it back complete and re-reading it to check nothing
+// else changed. One item's failure mustn't stop the rest, so errors are returned, not thrown.
+func markReprompt(_ id: String, _ bw: Bitwarden) -> MarkOutcome {
+    do {
+        let before = try bw.call("GET", "/object/item/\(id)")
+        if (before["reprompt"] as? Int ?? 0) != 0 { return .already }
+        if let why = protectBlocker(before) { return .skipped(why) }
+        var edited = before
+        edited["reprompt"] = 1
+        _ = try bw.call("PUT", "/object/item/\(id)", edited)
+        let after = try bw.call("GET", "/object/item/\(id)")
+        guard (after["reprompt"] as? Int ?? 0) == 1 else { return .failed("Bitwarden didn't keep the change") }
+        let note = editNote(before: before, after: after)
+        audit("marked re-prompt: \(id)\(note)")
+        return .marked(note)
+    } catch let f as Fail {
+        audit("failed to mark re-prompt: \(id): \(f.message)")
+        return .failed(f.message)
+    } catch {
+        return .failed("\(error)")
     }
 }
 

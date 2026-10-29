@@ -212,6 +212,7 @@ entirely, but password-manager extensions usually ignore automated clicks.
 To find and mark critical accounts in one go:
 
 ```sh
+agentouch protect --review              # Touch ID; pick in a window, names stay on your Mac
 agentouch protect                       # Touch ID; lists names and sites that look critical
 agentouch protect --all                 # Touch ID; lists every login and note (for an LLM to sort)
 agentouch protect --apply 1a2b3c4d,5e6f7a8b   # Touch ID; marks those "master password re-prompt"
@@ -222,9 +223,14 @@ government (the lists in `Sources/critical.swift`); you choose which
 to mark. It only ever turns re-prompt on, sends each item back complete, re-reads it to check
 nothing else changed, and skips logins with a passkey or attachments, or shared through an
 organisation (mark those yourself), since editing them through the Bitwarden CLI could lose data.
-Export your vault before the first `--apply`, and try it on a throwaway login first. Run it in
-your own terminal if you'd rather not show an agent which banks and services you use; an agent
-only needs to know that re-prompt logins are refused.
+Export your vault before the first change, and try it on a throwaway login first.
+
+`--review` is the private way: it reads the vault, locks it again, and opens a window on your Mac
+listing every login and note, with suggestions ticked. Suggestions come from Apple's on-device
+model when Apple Intelligence is on (nothing leaves the Mac), the built-in lists, and notes that
+look like wallet seed phrases. You adjust the ticks; it unlocks once more to mark them and
+prints only counts, so an agent that ran it never learns which banks or services you use. The
+other forms print names and sites to whoever runs them.
 
 ## With Claude Code
 
