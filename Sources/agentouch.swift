@@ -811,26 +811,7 @@ func cmdLogin(_ args: [String]) async throws {
 
 // MARK: Marking critical logins "master password re-prompt"
 
-// Sites whose logins are worth keeping away from agents: email, identity, password managers,
-// money, government. A suggestion list for `protect`; the user picks which to mark.
-let criticalDomains = [
-    "apple.com", "icloud.com", "google.com", "gmail.com", "microsoft.com", "live.com", "outlook.com",
-    "proton.me", "protonmail.com", "tuta.com", "fastmail.com", "yahoo.com", "bitwarden.com", "1password.com",
-    "paypal.com", "revolut.com", "wise.com", "n26.com", "bunq.com", "ing.nl", "ing.com", "abnamro.nl",
-    "rabobank.nl", "snsbank.nl", "asnbank.nl", "triodos.nl", "knab.nl", "piraeusbank.gr", "alpha.gr",
-    "eurobank.gr", "nbg.gr", "digid.nl", "overheid.nl", "belastingdienst.nl", "gov.gr", "gsis.gr",
-    "coinbase.com", "kraken.com", "binance.com", "bitvavo.com", "degiro.nl", "degiro.com",
-    "trading212.com", "interactivebrokers.com", "github.com", "cloudflare.com", "godaddy.com",
-    "namecheap.com", "amazonaws.com", "stripe.com", "amazon.com", "amazon.nl", "amazon.de", "facebook.com",
-    "x.com", "cosmote.gr", "vodafone.gr", "vodafone.nl", "kpn.com", "odido.nl",
-    "bybit.com", "okx.com", "kucoin.com", "bitpanda.com", "bitstamp.net", "gemini.com", "crypto.com",
-    "ledger.com", "trezor.io", "metamask.io", "exodus.com", "blockchain.com", "nexo.com", "uphold.com",
-    "bitget.com", "mexc.com", "gate.io", "htx.com", "bitfinex.com", "phantom.app", "rabby.io", "zengo.com",
-    "trustwallet.com", "bitonic.nl", "anycoin.nl", "lykke.com", "etoro.com", "plus500.com",
-]
-let criticalWords = ["bank", "gov", "tax", "belasting", "paypal", "crypto", "wallet", "broker", "invest",
-                     "pension", "pensioen", "verzeker", "insurance", "mail", "coin", "bitcoin", "ledger",
-                     "trezor", "metamask", "exchange", "defi", "swap", "seed", "trading", "stake"]
+// criticalDomains and criticalWords live in critical.swift.
 
 func host(of uri: String) -> String? {
     (URL(string: uri)?.host ?? URL(string: "https://\(uri)")?.host)?.lowercased()

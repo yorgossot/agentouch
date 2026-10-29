@@ -217,7 +217,7 @@ agentouch protect --apply 1a2b3c4d,5e6f7a8b   # Touch ID; marks those "master pa
 ```
 
 `protect` suggests logins for email, identity, password managers, banks, payments, brokers and
-government (`criticalDomains` and `criticalWords` in `Sources/agentouch.swift`); you choose which
+government (the lists in `Sources/critical.swift`); you choose which
 to mark. It only ever turns re-prompt on, sends each item back complete, re-reads it to check
 nothing else changed, and skips logins with a passkey or attachments, or shared through an
 organisation (mark those yourself), since editing them through the Bitwarden CLI could lose data.
