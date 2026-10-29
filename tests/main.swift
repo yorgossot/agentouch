@@ -41,7 +41,7 @@ do {
     let plan = try run(["api", "--", "curl", "-sS", "-H", "@-", "-d", "{}", "https://\(pi)/new?hostname=a.com"])
     check("pinned curl to its host is allowed", true)
     check("pinned curl gets -q first", plan.argv.prefix(2) == ["curl", "-q"])
-    check("prompt names the destination first", plan.prompt.hasPrefix("SEND “api” TO \(pi)\nby running: "), plan.prompt)
+    check("prompt names the destination first", plan.prompt.hasPrefix("SEND “api” to\n\n🌐  \(pi)\n\nby running: "), plan.prompt)
 } catch {
     check("pinned curl to its host is allowed", false, "\(error)")
 }

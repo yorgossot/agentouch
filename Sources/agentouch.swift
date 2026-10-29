@@ -739,10 +739,12 @@ func cmdLoginNew(_ args: [String]) async throws {
         throw Fail("no Bitwarden master password stored — the user runs: agentouch set-master")
     }
     let context = try await approve("""
-        CREATE A BITWARDEN LOGIN
-        ⟶ site: \(site)
-        ⟶ user: \(username)
-        in folder “\(folder)”; its new password goes to the clipboard
+        CREATE A BITWARDEN LOGIN for
+
+        🌐  \(site)
+        👤  \(username)
+
+        new password → clipboard (folder “\(folder)”)
         """)
     let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: store.seKey, authenticationContext: context)
     let master = try open(masterSecret, with: seKey, sePublic: store.sePublicKey)
@@ -816,9 +818,11 @@ func cmdLogin(_ args: [String]) async throws {
         throw Fail("no Bitwarden master password stored — the user runs: agentouch set-master")
     }
     let context = try await approve("""
-        LOG IN AS YOU
-        ⟶ site: \(plan.site)
-        \(plan.username.map { "⟶ user: \($0)\n" } ?? "")your saved password for it goes to the clipboard for 30 s
+        LOG IN AS YOU on
+
+        🌐  \(plan.site)
+        \(plan.username.map { "👤  \($0)\n" } ?? "")
+        password → clipboard for 30 s
         """)
     let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: store.seKey, authenticationContext: context)
     let master = try open(masterSecret, with: seKey, sePublic: store.sePublicKey)
@@ -1115,7 +1119,8 @@ func planRun(_ args: [String], store: Store) throws -> RunPlan {
     // Where the secret goes comes first, so a swapped destination stands out.
     let list = names.map { "“\($0)”" }.joined(separator: ", ")
     let urlHosts = argv.compactMap { URL(string: $0)?.host }.filter { _ in !pinned.isEmpty }
-    let action = urlHosts.isEmpty ? "USE \(list)" : "SEND \(list) TO \(Array(Set(urlHosts)).sorted().joined(separator: ", "))"
+    let action = urlHosts.isEmpty ? "USE \(list)"
+        : "SEND \(list) to\n\n🌐  \(Array(Set(urlHosts)).sorted().joined(separator: ", "))\n"
     return RunPlan(secrets: secrets, path: path, argv: argv, shown: shown, prompt: "\(action)\nby running: \(shown)")
 }
 
